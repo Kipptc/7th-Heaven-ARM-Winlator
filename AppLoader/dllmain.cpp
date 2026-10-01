@@ -13,6 +13,9 @@
 
 #include <iostream>
 #include <fstream>
+#include <string>
+#include <mutex>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 
@@ -125,7 +128,27 @@ static int(WINAPI* GameWinMain)(HINSTANCE hInstance, HINSTANCE hPrevInstance, LP
 
 DWORD currentMainThreadId = 0;
 HANDLE currentMainThread = nullptr;
-BOOL inDotNetCode = false;
+thread_local bool inDotNetCode = false;
+static std::mutex virtualHandlesMutex;
+static std::unordered_set<HANDLE> virtualHandles;
+
+static bool IsVirtualHandle(HANDLE handle)
+{
+    std::lock_guard<std::mutex> lock(virtualHandlesMutex);
+    return virtualHandles.contains(handle);
+}
+
+static void RegisterVirtualHandle(HANDLE handle)
+{
+    std::lock_guard<std::mutex> lock(virtualHandlesMutex);
+    virtualHandles.insert(handle);
+}
+
+static bool UnregisterVirtualHandle(HANDLE handle)
+{
+    std::lock_guard<std::mutex> lock(virtualHandlesMutex);
+    return virtualHandles.erase(handle) != 0;
+}
 
 // FUNCTIONS -------------------------------------
 
@@ -143,7 +166,9 @@ HANDLE WINAPI _CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwSh
         }
     }
 
-    if (ret == nullptr)
+    if (ret != nullptr)
+        RegisterVirtualHandle(ret);
+    else
         ret = TrueCreateFileW(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 
     return ret;
@@ -153,9 +178,11 @@ BOOL WINAPI _ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
 {
     BOOL ret = FALSE;
 
-    if (exports.ReadFile)
+    if (exports.ReadFile && !inDotNetCode && IsVirtualHandle(hFile))
     {
+        inDotNetCode = true;
         ret = exports.ReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped);
+        inDotNetCode = false;
     }
 
     if (ret == FALSE)
@@ -168,9 +195,11 @@ HANDLE WINAPI _FindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW lpFindFileD
 {
     HANDLE ret = nullptr;
 
-    if (exports.FindFirstFileW)
+    if (exports.FindFirstFileW && !inDotNetCode)
     {
+        inDotNetCode = true;
         ret = exports.FindFirstFileW(lpFileName, lpFindFileData);
+        inDotNetCode = false;
     }
 
     if (ret == nullptr)
@@ -183,9 +212,11 @@ HANDLE WINAPI _FindFirstFileExW(LPCWSTR lpFileName, FINDEX_INFO_LEVELS fInfoLeve
 {
     HANDLE ret = nullptr;
 
-    if (exports.FindFirstFileExW)
+    if (exports.FindFirstFileExW && !inDotNetCode)
     {
+        inDotNetCode = true;
         ret = exports.FindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+        inDotNetCode = false;
     }
 
     if (ret == nullptr)
@@ -198,9 +229,11 @@ BOOL WINAPI _FindNextFileW(HANDLE hFindFile, LPWIN32_FIND_DATAW lpFindFileData)
 {
     BOOL ret = FALSE;
 
-    if (exports.FindNextFileW)
+    if (exports.FindNextFileW && !inDotNetCode)
     {
+        inDotNetCode = true;
         ret = exports.FindNextFileW(hFindFile, lpFindFileData);
+        inDotNetCode = false;
     }
 
     if (ret == FALSE)
@@ -215,9 +248,11 @@ BOOL WINAPI _FindClose(HANDLE hFindFile)
 {
     BOOL ret = FALSE;
 
-    if (exports.FindClose)
+    if (exports.FindClose && !inDotNetCode)
     {
+        inDotNetCode = true;
         ret = exports.FindClose(hFindFile);
+        inDotNetCode = false;
     }
 
     if (ret == FALSE)
@@ -230,9 +265,11 @@ DWORD WINAPI _SetFilePointer(HANDLE hFile, LONG lDistanceToMove, PLONG lpDistanc
 {
     DWORD ret = INVALID_SET_FILE_POINTER;
 
-    if (exports.SetFilePointer)
+    if (exports.SetFilePointer && !inDotNetCode && IsVirtualHandle(hFile))
     {
+        inDotNetCode = true;
         ret = exports.SetFilePointer(hFile, lDistanceToMove, lpDistanceToMoveHigh, dwMoveMethod);
+        inDotNetCode = false;
     }
 
     if (ret == INVALID_SET_FILE_POINTER)
@@ -245,9 +282,11 @@ BOOL WINAPI _SetFilePointerEx(HANDLE hFile, LARGE_INTEGER liDistanceToMove, PLAR
 {
     BOOL ret = FALSE;
 
-    if (exports.SetFilePointerEx)
+    if (exports.SetFilePointerEx && !inDotNetCode && IsVirtualHandle(hFile))
     {
+        inDotNetCode = true;
         ret = exports.SetFilePointerEx(hFile, liDistanceToMove, lpNewFilePointer, dwMoveMethod);
+        inDotNetCode = false;
     }
 
     if (ret == FALSE)
@@ -258,37 +297,33 @@ BOOL WINAPI _SetFilePointerEx(HANDLE hFile, LARGE_INTEGER liDistanceToMove, PLAR
 
 BOOL WINAPI _CloseHandle(HANDLE hObject)
 {
-    if (exports.CloseHandle)
+    bool isVirtual = IsVirtualHandle(hObject);
+    if (exports.CloseHandle && !inDotNetCode && isVirtual)
     {
-        if (GetCurrentThreadId() == currentMainThreadId)
-        {
-            exports.CloseHandle(hObject);
-        }
+        inDotNetCode = true;
+        exports.CloseHandle(hObject);
+        inDotNetCode = false;
     }
+
+    if (isVirtual)
+        UnregisterVirtualHandle(hObject);
 
     return TrueCloseHandle(hObject);
 }
 
 DWORD WINAPI _GetFileType(HANDLE hFile)
 {
-    DWORD ret = FILE_TYPE_UNKNOWN;
-
-    if (exports.GetFileType)
-    {
-        ret = exports.GetFileType(hFile);
-    }
-
-    if (ret == FILE_TYPE_UNKNOWN)
-        ret = TrueGetFileType(hFile);
-
-    return ret;
+    // Preserve the wrapper's disk-file classification for redirected handles
+    // without entering .NET or its reflection invocation stub.
+    if (IsVirtualHandle(hFile)) return FILE_TYPE_DISK;
+    return TrueGetFileType(hFile);
 }
 
 BOOL WINAPI _GetFileInformationByHandle(HANDLE hFile, LPBY_HANDLE_FILE_INFORMATION lpFileInformation)
 {
     BOOL ret = FALSE;
 
-    if (exports.GetFileInformationByHandle)
+    if (exports.GetFileInformationByHandle && IsVirtualHandle(hFile))
     {
         if (!inDotNetCode)
         {
@@ -308,12 +343,12 @@ BOOL WINAPI _DuplicateHandle(HANDLE hSourceProcessHandle, HANDLE hSourceHandle, 
 {
     BOOL ret = TrueDuplicateHandle(hSourceProcessHandle, hSourceHandle, hTargetProcessHandle, lpTargetHandle, dwDesiredAccess, bInheritHandle, dwOptions);
 
-    if (exports.DuplicateHandle)
+    if (exports.DuplicateHandle && !inDotNetCode && ret && IsVirtualHandle(hSourceHandle))
     {
-        if (GetCurrentThreadId() == currentMainThreadId)
-        {
-            exports.DuplicateHandle(hSourceProcessHandle, hSourceHandle, hTargetProcessHandle, lpTargetHandle, dwDesiredAccess, bInheritHandle, dwOptions);
-        }
+        RegisterVirtualHandle(*lpTargetHandle);
+        inDotNetCode = true;
+        exports.DuplicateHandle(hSourceProcessHandle, hSourceHandle, hTargetProcessHandle, lpTargetHandle, dwDesiredAccess, bInheritHandle, dwOptions);
+        inDotNetCode = false;
     }
 
     return ret;
@@ -323,9 +358,11 @@ DWORD WINAPI _GetFileSize(HANDLE hFile, LPDWORD lpFileSizeHigh)
 {
     DWORD ret = INVALID_FILE_SIZE;
 
-    if (exports.GetFileSize)
+    if (exports.GetFileSize && !inDotNetCode && IsVirtualHandle(hFile))
     {
+        inDotNetCode = true;
         ret = exports.GetFileSize(hFile, lpFileSizeHigh);
+        inDotNetCode = false;
     }
 
     if (ret == INVALID_FILE_SIZE)
@@ -338,9 +375,11 @@ BOOL WINAPI _GetFileSizeEx(HANDLE hFile, PLARGE_INTEGER lpFileSize)
 {
     BOOL ret = FALSE;
 
-    if (exports.GetFileSizeEx)
+    if (exports.GetFileSizeEx && !inDotNetCode && IsVirtualHandle(hFile))
     {
+        inDotNetCode = true;
         ret = exports.GetFileSizeEx(hFile, lpFileSize);
+        inDotNetCode = false;
     }
 
     if (ret == FALSE)
@@ -353,9 +392,11 @@ BOOL WINAPI _GetFileAttributesExW(LPCWSTR lpFileName, GET_FILEEX_INFO_LEVELS fIn
 {
     BOOL ret = FALSE;
 
-    if (exports.GetFileAttributesExW)
+    if (exports.GetFileAttributesExW && !inDotNetCode)
     {
+        inDotNetCode = true;
         ret = exports.GetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation);
+        inDotNetCode = false;
     }
 
     if (ret == FALSE)
@@ -450,7 +491,7 @@ private:
 LONG WINAPI ExceptionHandler(EXCEPTION_POINTERS* ep)
 {
     PLOGV << "*** Exception 0x" << std::hex << ep->ExceptionRecord->ExceptionCode << ", address 0x" << std::hex << ep->ExceptionRecord->ExceptionAddress << " ***";
-    
+
     _7thStackWalker sw;
     sw.ShowCallstack(
         GetCurrentThread(),
@@ -520,7 +561,7 @@ DWORD GetCurrentProcessMainThreadId()
 DWORD WINAPI StartProxy(LPVOID lpParam) {
     HINSTANCE hinstDLL = (HINSTANCE)lpParam;
 
-    
+
 
     return 0;
 }
@@ -531,9 +572,17 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
     if (fdwReason != DLL_PROCESS_ATTACH) return TRUE;
     if (DetourIsHelperProcess()) return TRUE;
 
-    // Setup logging layer
-    remove("AppLoader.log");
-    plog::init<plog::_7thFormatter>(plog::verbose, "AppLoader.log");
+    // Keep the loader log in Bannerlator Downloads when that drive is mounted.
+    // A local file remains the fallback for ordinary Windows installations.
+    const char* loader_log = "AppLoader.log";
+    const DWORD download_drive = GetFileAttributesA("D:\\");
+    if (download_drive != INVALID_FILE_ATTRIBUTES &&
+        (download_drive & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (CreateDirectoryA("D:\\7h-ARM", nullptr) || GetLastError() == ERROR_ALREADY_EXISTS) &&
+        (CreateDirectoryA("D:\\7h-ARM\\logs", nullptr) || GetLastError() == ERROR_ALREADY_EXISTS))
+        loader_log = "D:\\7h-ARM\\logs\\AppLoader.log";
+    remove(loader_log);
+    plog::init<plog::_7thFormatter>(plog::verbose, loader_log);
     PLOGI << "AppLoader init log";
 
     // Log unhandled exceptions
@@ -558,14 +607,78 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
             // ------------------------------------
             DetourTransactionCommit();
 
+            wchar_t game_path[MAX_PATH] = {};
+            const DWORD game_path_length = GetModuleFileNameW(nullptr, game_path, MAX_PATH);
+            if (game_path_length == 0 || game_path_length >= MAX_PATH)
+            {
+                PLOGE << "Could not determine the FF7 executable directory.";
+                return target(hInstance, hPrevInstance, lpCmdLine, nShowCmd);
+            }
+            std::wstring game_directory(game_path);
+            const auto separator = game_directory.find_last_of(L"\\/");
+            if (separator == std::wstring::npos)
+            {
+                PLOGE << "The FF7 executable path has no parent directory.";
+                return target(hInstance, hPrevInstance, lpCmdLine, nShowCmd);
+            }
+            game_directory.resize(separator + 1);
+
+            // CoreCLR's writable/executable JIT mode can fail under FEX on Wine.
+            // Apply this only to the game process before hostfxr starts the runtime,
+            // while respecting an explicit container or shortcut override.
+            const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+            if (ntdll != nullptr && GetProcAddress(ntdll, "wine_get_version") != nullptr)
+            {
+                wchar_t write_xor_execute[16] = {};
+                if (GetEnvironmentVariableW(L"DOTNET_EnableWriteXorExecute", write_xor_execute, 16) == 0)
+                {
+                    if (SetEnvironmentVariableW(L"DOTNET_EnableWriteXorExecute", L"0"))
+                        PLOGI << "Set DOTNET_EnableWriteXorExecute=0 before starting the x86 .NET runtime.";
+                    else
+                        PLOGW << "Could not set DOTNET_EnableWriteXorExecute (Win32 error " << GetLastError() << ").";
+                }
+                else
+                    PLOGI << "Using the existing DOTNET_EnableWriteXorExecute container setting.";
+            }
+
+            wchar_t private_dotnet_root[MAX_PATH] = {};
+            DWORD root_length = GetEnvironmentVariableW(L"SEVENTH_HEAVEN_DOTNET_ROOT_X86", private_dotnet_root, MAX_PATH);
+            if (root_length == 0 || root_length >= MAX_PATH)
+            {
+                const std::wstring runtime_config_path = game_directory + L"7thHeavenRuntime.ini";
+                root_length = GetPrivateProfileStringW(L"Runtime", L"X86DotnetRoot", L"",
+                    private_dotnet_root, MAX_PATH, runtime_config_path.c_str());
+            }
+            get_hostfxr_parameters hostfxr_parameters = { sizeof(get_hostfxr_parameters), nullptr,
+                root_length > 0 && root_length < MAX_PATH ? private_dotnet_root : nullptr };
+
             size_t buffer_size = 0;
-            get_hostfxr_path(nullptr, &buffer_size, nullptr);
+            get_hostfxr_path(nullptr, &buffer_size, &hostfxr_parameters);
+
+            if (buffer_size == 0)
+            {
+                PLOGE << "Could not locate the x86 .NET hostfxr. AppProxy needs a matching x86 .NET runtime to load mods.";
+                return target(hInstance, hPrevInstance, lpCmdLine, nShowCmd);
+            }
 
             auto buffer = new char_t[buffer_size];
-            get_hostfxr_path(buffer, &buffer_size, nullptr);
+            const int hostfxr_path_result = get_hostfxr_path(buffer, &buffer_size, &hostfxr_parameters);
+
+            if (hostfxr_path_result != 0)
+            {
+                PLOGE << "Could not resolve the x86 .NET hostfxr path (error " << hostfxr_path_result << ").";
+                delete[] buffer;
+                return target(hInstance, hPrevInstance, lpCmdLine, nShowCmd);
+            }
 
             auto hostfxr = LoadLibraryW(buffer);
             delete[] buffer;
+
+            if (hostfxr == nullptr)
+            {
+                PLOGE << "Could not load the x86 .NET hostfxr (Win32 error " << GetLastError() << ").";
+                return target(hInstance, hPrevInstance, lpCmdLine, nShowCmd);
+            }
 
 #define X(n) *(void**)&n = GetProcAddress(hostfxr, #n);
 #include "hostfxr.x.h"
@@ -573,7 +686,13 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 
             hostfxr_handle context = nullptr;
             hostfxr_set_error_writer([](auto message) { OutputDebugString(message); });
-            hostfxr_initialize_for_runtime_config(MAIN_ASM_NAME L".runtimeconfig.json", nullptr, &context);
+            const std::wstring proxy_runtime_config = game_directory + MAIN_ASM_NAME L".runtimeconfig.json";
+            const int init_result = hostfxr_initialize_for_runtime_config(proxy_runtime_config.c_str(), nullptr, &context);
+            if (init_result != 0 || context == nullptr)
+            {
+                PLOGE << "Could not initialize AppProxy runtime (error " << init_result << ").";
+                return target(hInstance, hPrevInstance, lpCmdLine, nShowCmd);
+            }
 
 #define X(n) hostfxr_get_runtime_delegate(context, hdt_##n, (void**)&n);
 #include "delegates.x.h"
@@ -582,7 +701,13 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
             hostfxr_close(context);
 
             // Get main entry point and load the assembly
-            load_assembly_and_get_function_pointer(MAIN_ASM_NAME L".dll", MAIN_TYP_NAME L", " MAIN_ASM_NAME, MAIN_FUN_NAME, UNMANAGEDCALLERSONLY_METHOD, nullptr, (void**)&HostInitialize);
+            const std::wstring proxy_assembly = game_directory + MAIN_ASM_NAME L".dll";
+            const int load_result = load_assembly_and_get_function_pointer(proxy_assembly.c_str(), MAIN_TYP_NAME L", " MAIN_ASM_NAME, MAIN_FUN_NAME, UNMANAGEDCALLERSONLY_METHOD, nullptr, (void**)&HostInitialize);
+            if (load_result != 0 || HostInitialize == nullptr)
+            {
+                PLOGE << "Could not load AppProxy entry point (error " << load_result << ").";
+                return target(hInstance, hPrevInstance, lpCmdLine, nShowCmd);
+            }
 
             // Start the AppProxy process
             HostInitialize(&exports);

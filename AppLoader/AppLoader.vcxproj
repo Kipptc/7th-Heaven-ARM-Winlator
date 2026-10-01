@@ -185,6 +185,16 @@
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
   </ItemGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|win32'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\vcpkg_installed\x86-windows-static\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(MSBuildProjectDirectory)\vcpkg_installed\x86-windows-static\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>detours.lib;StackWalker.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <None Include="vcpkg.json" />
   </ItemGroup>
@@ -204,6 +214,6 @@
     </VisualStudio>
   </ProjectExtensions>
   <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="copy $(USERPROFILE)\.nuget\packages\runtime.win-x86.microsoft.netcore.dotnetapphost\10.0.11\runtimes\win-x86\native\nethost.dll $(OutDir)" />
+    <Exec Command="copy /Y &quot;$(USERPROFILE)\.nuget\packages\runtime.win-x86.microsoft.netcore.dotnetapphost\10.0.11\runtimes\win-x86\native\nethost.dll&quot; &quot;$(OutDir)nethost.dll&quot;" />
   </Target>
 </Project>

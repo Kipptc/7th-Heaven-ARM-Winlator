@@ -16,6 +16,8 @@ using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 
 namespace AppUI
@@ -35,6 +37,25 @@ namespace AppUI
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            if (WineEnvironment.IsRunningInWine())
+            {
+                RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
+
+                string logDirectory = WineEnvironment.TryGetBannerlatorLogDirectory();
+                if (logDirectory != null && NLog.LogManager.Configuration?.FindTargetByName("logfile") is NLog.Targets.FileTarget fileTarget)
+                {
+                    fileTarget.FileName = Path.Combine(logDirectory, "applog.txt");
+                    NLog.LogManager.ReconfigExistingLoggers();
+                }
+
+                string privateRuntime = Path.Combine(AppContext.BaseDirectory, "runtime-x86");
+                if (Directory.Exists(Path.Combine(privateRuntime, "host", "fxr")) &&
+                    string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SEVENTH_HEAVEN_DOTNET_ROOT_X86")))
+                {
+                    Environment.SetEnvironmentVariable("SEVENTH_HEAVEN_DOTNET_ROOT_X86", privateRuntime);
+                }
+            }
+
             bool isNewInstance;
 
             // Create a named mutex, which allows only one instance of the application.
@@ -51,6 +72,16 @@ namespace AppUI
 
                 // check if default language saved in app settings; otherwise detect language from thread
                 string defaultLang = Sys.Settings.AppLanguage;
+
+                if (WineEnvironment.IsRunningInWine())
+                {
+                    try
+                    {
+                        if (WineEnvironment.ExportFFNxLogIfNewer(Sys.Settings.FF7Exe))
+                            Logger.Info("Exported the previous FFNx.log to Bannerlator Downloads on startup.");
+                    }
+                    catch (Exception ex) { Logger.Warn(ex, "Could not export the previous FFNx log on startup."); }
+                }
 
                 if (string.IsNullOrWhiteSpace(defaultLang))
                 {
@@ -364,6 +395,12 @@ namespace AppUI
 
         public static void ForceUpdateUI()
         {
+            // Nested dispatcher frames can re-enter WPF rendering while Wine
+            // is still processing a previous render pass. Its normal dispatcher
+            // loop will paint these status updates without forcing a frame.
+            if (WineEnvironment.IsRunningInWine())
+                return;
+
             DispatcherFrame frame = new DispatcherFrame();
 
             Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.Render, new DispatcherOperationCallback(delegate (object parameter)

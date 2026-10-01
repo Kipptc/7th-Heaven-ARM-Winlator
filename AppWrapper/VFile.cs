@@ -311,9 +311,7 @@ namespace AppWrapper {
 
     class VArchiveData
     {
-        [DllImport("msvcrt.dll", EntryPoint = "memcpy", CallingConvention = CallingConvention.Cdecl, SetLastError = false)]
-        public static extern IntPtr memcpy(IntPtr dest, IntPtr src, uint count);
-
+        private readonly object _positionLock = new object();
         private long _position, _size;
         private byte[] _data;
 
@@ -328,38 +326,54 @@ namespace AppWrapper {
 
         public uint SetFilePointer(long offset, Win32.EMoveMethod method)
         {
-            switch (method)
+            lock (_positionLock)
             {
-                case Win32.EMoveMethod.Begin:
-                    _position = offset;
-                    break;
-                case Win32.EMoveMethod.End:
-                    _position = _size + offset;
-                    break;
-                case Win32.EMoveMethod.Current:
-                    _position += offset;
-                    break;
+                return TrySetPosition(offset, method) ? unchecked((uint)_position) : uint.MaxValue;
             }
-            if (_position < 0) return uint.MaxValue;
-            if (_position > _size) return uint.MaxValue;
-            return Convert.ToUInt32(_position);
         }
         public int SetFilePointerEx(IntPtr hFile, long liDistanceToMove, IntPtr lpNewFilePointer, uint dwMoveMethod)
         {
-            SetFilePointer(liDistanceToMove, (Win32.EMoveMethod)dwMoveMethod);
-            if (lpNewFilePointer != IntPtr.Zero)
-                System.Runtime.InteropServices.Marshal.WriteInt64(lpNewFilePointer, _position);
-            return 1;
+            lock (_positionLock)
+            {
+                if (!TrySetPosition(liDistanceToMove, (Win32.EMoveMethod)dwMoveMethod)) return 0;
+                if (lpNewFilePointer != IntPtr.Zero)
+                    Marshal.WriteInt64(lpNewFilePointer, _position);
+                return 1;
+            }
         }
-        public unsafe int ReadFile(IntPtr bytes, uint numBytesToRead, ref uint numBytesRead)
-        {
-            numBytesRead = Math.Min(numBytesToRead, (uint)(_size - _position));
-            if (numBytesRead == 0) return 1;
 
-            fixed (byte* ptr = &_data[_position])
-                memcpy(bytes, new IntPtr(ptr), numBytesRead);
-            _position += numBytesRead;
-            return 1;
+        private bool TrySetPosition(long offset, Win32.EMoveMethod method)
+        {
+            long origin;
+            switch (method)
+            {
+                case Win32.EMoveMethod.Begin: origin = 0; break;
+                case Win32.EMoveMethod.Current: origin = _position; break;
+                case Win32.EMoveMethod.End: origin = _size; break;
+                default: return false;
+            }
+
+            long next;
+            try { next = checked(origin + offset); }
+            catch (OverflowException) { return false; }
+            if (next < 0) return false;
+            // Windows permits seeking past EOF. A subsequent read must return zero bytes.
+            _position = next;
+            return true;
+        }
+
+        public int ReadFile(IntPtr bytes, uint numBytesToRead, ref uint numBytesRead)
+        {
+            lock (_positionLock)
+            {
+                long available = Math.Max(0, _size - _position);
+                numBytesRead = (uint)Math.Min((long)numBytesToRead, available);
+                if (numBytesRead == 0) return 1;
+
+                Marshal.Copy(_data, checked((int)_position), bytes, checked((int)numBytesRead));
+                _position += numBytesRead;
+                return 1;
+            }
         }
         public uint GetFileSize(IntPtr lpFileSizeHigh)
         {

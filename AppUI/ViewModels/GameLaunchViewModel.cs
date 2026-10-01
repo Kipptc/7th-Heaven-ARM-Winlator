@@ -48,6 +48,7 @@ namespace AppUI.ViewModels
                 {
                     GameLauncher.Instance.ProgressChanged += LaunchGame_ProgressChanged;
 
+                    Logger.Info("Beginning game launch preparation.");
                     didLaunch = GameLauncher.LaunchGame(variableDump, debugLogging, IsLaunchingWithNoMods).Result;
                 }
                 finally

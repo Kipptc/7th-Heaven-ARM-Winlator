@@ -95,9 +95,15 @@ namespace Iros.Workshop
             Items.Add(ii);
             _lookup[ii.ModID] = ii;
             PendingDelete.RemoveAll(s => s.Equals(ii.LatestInstalled.InstalledLocation, StringComparison.InvariantCultureIgnoreCase));
-            Sys.SetStatus(ii.ModID, ModStatus.Installed);
+            if (WineEnvironment.IsRunningInWine())
+                Sys.Message(new WMessage($"Library add: rebuilding variables for {ii.ModID}", WMessageLogLevel.LogOnly));
             Sys.rebuildVars();
+            if (WineEnvironment.IsRunningInWine())
+                Sys.Message(new WMessage($"Library add: saving library for {ii.ModID}", WMessageLogLevel.LogOnly));
             Sys.SaveLibrary();
+            if (WineEnvironment.IsRunningInWine())
+                Sys.Message(new WMessage($"Library add: saved library for {ii.ModID}", WMessageLogLevel.LogOnly));
+            Sys.SetStatus(ii.ModID, ModStatus.Installed);
         }
 
         public void RemoveInstall(InstalledItem ii)

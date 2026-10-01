@@ -114,7 +114,12 @@ namespace AppCore
         /// <returns>Parsed and imported mod</returns>
         public Mod Import(string source, string name, bool iroMode, bool noCopy)
         {
+            if (WineEnvironment.IsRunningInWine())
+                Sys.Message(new WMessage($"Mod import: parsing {source}" +
+                    (File.Exists(source) ? $" ({new FileInfo(source).Length} bytes)" : " (folder)"), WMessageLogLevel.LogOnly));
             Mod m = ParseModXmlFromSource(source); // this will increment the progress changed value up to 50%
+            if (WineEnvironment.IsRunningInWine())
+                Sys.Message(new WMessage($"Mod import: parsed mod.xml for {source}", WMessageLogLevel.LogOnly));
 
             if (string.IsNullOrWhiteSpace(m.Name))
             {
@@ -124,6 +129,8 @@ namespace AppCore
             // validate mod with same ID doesn't exist in library
             // ... if it already exists then check if it's newer version to update to
             InstalledItem existingItem = Sys.Library.GetItem(m.ID);
+            if (WineEnvironment.IsRunningInWine())
+                Sys.Message(new WMessage($"Mod import: existing-library lookup finished for {m.ID}", WMessageLogLevel.LogOnly));
 
             if (existingItem != null)
             {
@@ -174,6 +181,8 @@ namespace AppCore
             }
 
             RaiseProgressChanged("Finalizing import", 95);
+            if (WineEnvironment.IsRunningInWine())
+                Sys.Message(new WMessage($"Mod import: adding {m.Name} to library", WMessageLogLevel.LogOnly));
 
             Sys.Library.AddInstall(new InstalledItem()
             {
@@ -183,6 +192,8 @@ namespace AppCore
                 UpdateType = Sys.Library.DefaultUpdate,
                 Versions = new List<InstalledVersion>() { new InstalledVersion() { VersionDetails = m.LatestVersion, InstalledLocation = destFileName } },
             });
+            if (WineEnvironment.IsRunningInWine())
+                Sys.Message(new WMessage($"Mod import: library update finished for {m.Name}", WMessageLogLevel.LogOnly));
 
             if (!Sys.ActiveProfile.HasItem(m.ID))
             {
@@ -301,6 +312,7 @@ namespace AppCore
         /// <returns></returns>
         public Mod ParseModXmlFromSource(string sourceFileOrFolder, Mod defaultModIfMissing = null)
         {
+            bool traceWine = WineEnvironment.IsRunningInWine();
             if (defaultModIfMissing == null)
             {
                 defaultModIfMissing = new Mod()
@@ -333,44 +345,78 @@ namespace AppCore
             XmlDocument doc = null;
             IrosArc arc = null;
 
+            if (traceWine && isIroFile)
+                Sys.Message(new WMessage("IRO import: collecting known music and movie filenames", WMessageLogLevel.LogOnly));
             string[] musicFiles = FF7FileLister.GetMusicFiles();
             string[] movieFiles = FF7FileLister.GetMovieFiles().Keys.ToArray();
+            if (traceWine && isIroFile)
+                Sys.Message(new WMessage("IRO import: known filenames collected", WMessageLogLevel.LogOnly));
 
 
             if (isIroFile)
             {
                 RaiseProgressChanged("Getting mod.xml data from .iro", 10);
+                if (traceWine)
+                    Sys.Message(new WMessage($"IRO import: opening archive {sourceFileOrFolder}", WMessageLogLevel.LogOnly));
 
+                int nextScanLog = 0;
                 arc = new IrosArc(sourceFileOrFolder, patchable: false, (i, fileCount) =>
                 {
                     double newProgress = 10.0 + ((double)i / fileCount) * 30.0;
                     RaiseProgressChanged($"Scanning .iro archive files {i} / {fileCount}", newProgress);
+                    if (traceWine && fileCount > 0)
+                    {
+                        int scanPercent = (int)(100.0 * i / fileCount);
+                        if (scanPercent >= nextScanLog)
+                        {
+                            Sys.Message(new WMessage($"IRO import: scanned {i}/{fileCount} directory entries", WMessageLogLevel.LogOnly));
+                            nextScanLog = scanPercent + 20;
+                        }
+                    }
                 });
+                if (traceWine)
+                    Sys.Message(new WMessage("IRO import: archive directory opened", WMessageLogLevel.LogOnly));
 
                 if (arc.HasFile("mod.xml"))
                 {
+                    if (traceWine)
+                        Sys.Message(new WMessage("IRO import: reading mod.xml", WMessageLogLevel.LogOnly));
                     doc = new XmlDocument();
                     doc.Load(arc.GetData("mod.xml"));
+                    if (traceWine)
+                        Sys.Message(new WMessage("IRO import: mod.xml loaded", WMessageLogLevel.LogOnly));
                 }
 
                 RaiseProgressChanged($"Scanning .iro archive files for movie and music files", 45);
+                if (traceWine)
+                    Sys.Message(new WMessage("IRO import: starting media-file scan", WMessageLogLevel.LogOnly));
+                var knownMusicFiles = new HashSet<string>(musicFiles, StringComparer.InvariantCultureIgnoreCase);
+                var knownMovieFiles = new HashSet<string>(movieFiles, StringComparer.InvariantCultureIgnoreCase);
+                int mediaFilesScanned = 0;
                 foreach (string file in arc.AllFileNames())
                 {
-                    if (musicFiles.Any(f => f.Equals(Path.GetFileName(file), StringComparison.InvariantCultureIgnoreCase)))
+                    string fileName = Path.GetFileName(file);
+                    if (knownMusicFiles.Contains(fileName))
                     {
                         parsedMod.ContainsMusic = true;
                     }
 
-                    if (movieFiles.Any(f => f.Equals(Path.GetFileName(file), StringComparison.InvariantCultureIgnoreCase)))
+                    if (knownMovieFiles.Contains(fileName))
                     {
                         parsedMod.ContainsMovies = true;
                     }
+
+                    mediaFilesScanned++;
+                    if (traceWine && mediaFilesScanned % 5000 == 0)
+                        Sys.Message(new WMessage($"IRO import: scanned {mediaFilesScanned} media filenames", WMessageLogLevel.LogOnly));
 
                     if (parsedMod.ContainsMovies && parsedMod.ContainsMusic)
                     {
                         break; // break out of loop to stop scanning since confirmed both music and movie files exist in mod
                     }
                 }
+                if (traceWine)
+                    Sys.Message(new WMessage("IRO import: media-file scan finished", WMessageLogLevel.LogOnly));
             }
             else
             {
@@ -478,6 +524,8 @@ namespace AppCore
                 var pv = doc.SelectSingleNode("/ModInfo/PreviewFile");
                 if (pv != null)
                 {
+                    if (traceWine)
+                        Sys.Message(new WMessage($"IRO import: reading preview {pv.InnerText}", WMessageLogLevel.LogOnly));
                     // add the preview file to image cache and set the url prefixed with iros://Preview/Auto since it came from auto-import
                     byte[] data = null;
 
@@ -497,6 +545,8 @@ namespace AppCore
                         parsedMod.LatestVersion.PreviewImage = url;
                         Sys.ImageCache.InsertManual(url, data);
                     }
+                    if (traceWine)
+                        Sys.Message(new WMessage("IRO import: preview processing finished", WMessageLogLevel.LogOnly));
                 }
             }
 
@@ -504,6 +554,9 @@ namespace AppCore
             {
                 arc.Dispose();
             }
+
+            if (traceWine && isIroFile)
+                Sys.Message(new WMessage("IRO import: archive scan and metadata parse finished", WMessageLogLevel.LogOnly));
 
             return parsedMod;
         }

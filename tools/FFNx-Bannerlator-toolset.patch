@@ -1,0 +1,12 @@
+diff --git a/.vcpkg/triplets/x86-windows-static.cmake b/.vcpkg/triplets/x86-windows-static.cmake
+index 51fe757..d0ad8a3 100644
+--- a/.vcpkg/triplets/x86-windows-static.cmake
++++ b/.vcpkg/triplets/x86-windows-static.cmake
+@@ -1,4 +1,4 @@
+-set(VCPKG_PLATFORM_TOOLSET v143)
++set(VCPKG_PLATFORM_TOOLSET v145)
+ set(VCPKG_TARGET_ARCHITECTURE x86)
+ set(VCPKG_CRT_LINKAGE static)
+-set(VCPKG_LIBRARY_LINKAGE static)
+\ No newline at end of file
++set(VCPKG_LIBRARY_LINKAGE static)

@@ -416,9 +416,9 @@ namespace AppUI.ViewModels
         public static void AutoDetectSystemPaths(Settings settings)
         {
             string ff7 = null;
-            bool isRunningInWine = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WINELOADER"));
+            bool isRunningInWine = WineEnvironment.IsRunningInWine();
 
-            if (string.IsNullOrEmpty(settings.FF7Exe) || !File.Exists(settings.FF7Exe) && !isRunningInWine)
+            if (string.IsNullOrEmpty(settings.FF7Exe) || !File.Exists(settings.FF7Exe))
             {
                 Logger.Info("FF7 Exe path is empty or ff7.exe is missing. Auto detecting paths ...");
 
@@ -694,17 +694,21 @@ namespace AppUI.ViewModels
                     break;
             }
 
-            if (installFFNxIfMissing && !FFNxDriverUpdater.IsAlreadyInstalled())
+            if (installFFNxIfMissing && !FFNxDriverUpdater.IsInitialSetupInProgress &&
+                (!FFNxDriverUpdater.IsAlreadyInstalled() ||
+                (WineEnvironment.IsRunningInWine() && !FFNxDriverUpdater.IsInitialSetupReady)))
             {
                 try
                 {
                     FFNxDriverUpdater updater = new FFNxDriverUpdater();
 
                     Sys.Message(new WMessage($"Downloading and extracting the latest FFNx {Sys.Settings.FFNxUpdateChannel} version to {Sys.InstallPath}..."));
-                    updater.DownloadAndExtractLatestVersion(Sys.Settings.FFNxUpdateChannel);
+                    updater.DownloadAndExtractLatestVersion(Sys.Settings.FFNxUpdateChannel,
+                        initialSetup: WineEnvironment.IsRunningInWine());
                 }
                 catch (Exception ex)
                 {
+                    if (WineEnvironment.IsRunningInWine()) FFNxDriverUpdater.AbortInitialSetup();
                     Sys.Message(new WMessage($"Something went wrong while attempting to install FFNx. See logs."));
                     Logger.Error(ex);
                     return false;
@@ -728,31 +732,34 @@ namespace AppUI.ViewModels
                 Directory.CreateDirectory(Path.Combine(pathToFf7, folder));
             }
 
-            if (Sys.Settings.HasOption(GeneralOptions.OpenIrosLinksWith7H))
+            if (!WineEnvironment.IsRunningInWine())
             {
-                AssociateIrosUrlWith7H();
-            }
-            else
-            {
-                RemoveIrosUrlAssociationFromRegistry();
-            }
+                if (Sys.Settings.HasOption(GeneralOptions.OpenIrosLinksWith7H))
+                {
+                    AssociateIrosUrlWith7H();
+                }
+                else
+                {
+                    RemoveIrosUrlAssociationFromRegistry();
+                }
 
-            if (Sys.Settings.HasOption(GeneralOptions.OpenModFilesWith7H))
-            {
-                AssociateIroFilesWith7H();
-            }
-            else
-            {
-                RemoveIroFileAssociationFromRegistry();
-            }
+                if (Sys.Settings.HasOption(GeneralOptions.OpenModFilesWith7H))
+                {
+                    AssociateIroFilesWith7H();
+                }
+                else
+                {
+                    RemoveIroFileAssociationFromRegistry();
+                }
 
-            if (Sys.Settings.HasOption(GeneralOptions.Show7HInFileExplorerContextMenu))
-            {
-                AssociateFileExplorerContextMenuWith7H();
-            }
-            else
-            {
-                RemoveFileExplorerContextMenuAssociationWith7H();
+                if (Sys.Settings.HasOption(GeneralOptions.Show7HInFileExplorerContextMenu))
+                {
+                    AssociateFileExplorerContextMenuWith7H();
+                }
+                else
+                {
+                    RemoveFileExplorerContextMenuAssociationWith7H();
+                }
             }
 
             RegistryHelper.CommitTransaction();

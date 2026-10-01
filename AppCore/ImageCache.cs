@@ -213,6 +213,25 @@ namespace Iros.Workshop {
         {
             if (String.IsNullOrWhiteSpace(url)) return null;
 
+            // Imgur catalog images can be several thousand pixels wide. Its large
+            // thumbnail is enough for the 450x350 preview and avoids decoding (or
+            // even downloading) the original image under Wine.
+            if (WineEnvironment.IsRunningInWine() && Uri.TryCreate(url, UriKind.Absolute, out Uri imageUri) &&
+                imageUri.Host.Equals("i.imgur.com", StringComparison.OrdinalIgnoreCase))
+            {
+                string extension = Path.GetExtension(imageUri.AbsolutePath);
+                string imageId = Path.GetFileNameWithoutExtension(imageUri.AbsolutePath);
+                if ((imageId.Length == 5 || imageId.Length == 7) && imageId.All(char.IsLetterOrDigit) &&
+                    (extension.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+                    extension.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
+                    extension.Equals(".jpeg", StringComparison.OrdinalIgnoreCase)))
+                {
+                    UriBuilder thumbnail = new UriBuilder(imageUri);
+                    thumbnail.Path = imageUri.AbsolutePath.Substring(0, imageUri.AbsolutePath.Length - extension.Length) + "l" + extension;
+                    url = thumbnail.Uri.AbsoluteUri;
+                }
+            }
+
             bool gotValue = false;
             string pathToImage = null;
             ImageCacheEntry e;

@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using System.Resources;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -7,12 +7,12 @@ using System.Windows;
 // General Information about an assembly is controlled through the following
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
-[assembly: AssemblyTitle("7th Heaven")]
-[assembly: AssemblyDescription("Mod Manager for Final Fantasy 7")]
+[assembly: AssemblyTitle("7th Heaven ARM for Bannerlator (Beta)")]
+[assembly: AssemblyDescription("Unofficial Bannerlator ARM64 beta fork of 7th Heaven")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("7th Heaven")]
-[assembly: AssemblyCopyright("Tsunamods © 2024")]
+[assembly: AssemblyCompany("Cyan")]
+[assembly: AssemblyProduct("7th Heaven ARM for Bannerlator")]
+[assembly: AssemblyCopyright("Tsunamods © 2024; Bannerlator adaptations © 2026 Cyan")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
@@ -50,6 +50,6 @@ using System.Windows;
 //
 // You can specify all the values or you can default the Build and Revision Numbers
 // by using the '*' as shown below:
-[assembly: AssemblyVersion("0.0.0.0")]
-[assembly: AssemblyFileVersion("0.0.0.0")]
-[assembly: AssemblyInformationalVersion("0.0.0.0")]
+[assembly: AssemblyVersion("0.7.0.0")]
+[assembly: AssemblyFileVersion("0.7.0.0")]
+[assembly: AssemblyInformationalVersion("0.7.0.0")]

@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows7.0</TargetFramework>
+    <TargetFramework Condition="'$(BannerlatorTargetFramework)' == ''">net10.0-windows7.0</TargetFramework>
+    <DefineConstants Condition="'$(BannerlatorBuild)' == 'true'">$(DefineConstants);BANNERLATOR_BUILD</DefineConstants>
+    <TargetFramework Condition="'$(BannerlatorTargetFramework)' != ''">$(BannerlatorTargetFramework)</TargetFramework>
     <OutputType>WinExe</OutputType>
     <RootNamespace>AppUI</RootNamespace>
     <AssemblyName>7th Heaven</AssemblyName>
@@ -61,6 +63,11 @@
   </PropertyGroup>
   <ItemGroup>
     <RuntimeHostConfigurationOption Include="System.Net.SocketsHttpHandler.Http3Support" Value="false" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(BannerlatorBuild)' == 'true'">
+    <RuntimeHostConfigurationOption Include="System.Globalization.UseNls" Value="true" />
+    <RuntimeHostConfigurationOption Include="System.Runtime.EnableWriteXorExecute" Value="false" />
+    <RuntimeHostConfigurationOption Include="System.Runtime.TieredCompilation" Value="false" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="DS4WindowsCore">
@@ -631,6 +638,7 @@
       <Version>6.2.0</Version>
     </PackageReference>
     <PackageReference Include="SevenZipExtractor" Version="1.0.19" />
+    <PackageReference Include="StbImageSharp" Version="2.30.16" />
     <PackageReference Include="SharpDX.DirectInput">
       <Version>4.2.0</Version>
     </PackageReference>
@@ -644,6 +652,10 @@
     <NoWarn>CA1416</NoWarn>
   </PropertyGroup>
   <Target Name="7thAfterBuild" AfterTargets="AfterBuild">
-    <Copy SourceFiles="../AppProxy/bin/$(Configuration)/$(TargetFramework)/AppProxy.runtimeconfig.json" DestinationFolder="$(OutputPath)" ContinueOnError="false" />
+    <PropertyGroup>
+      <_AppProxyRuntimeConfig>../AppProxy/bin/$(Configuration)/$(TargetFramework)/AppProxy.runtimeconfig.json</_AppProxyRuntimeConfig>
+      <_AppProxyRuntimeConfig Condition="'$(RuntimeIdentifier)' != ''">../AppProxy/bin/$(Configuration)/$(TargetFramework)/$(RuntimeIdentifier)/AppProxy.runtimeconfig.json</_AppProxyRuntimeConfig>
+    </PropertyGroup>
+    <Copy SourceFiles="$(_AppProxyRuntimeConfig)" DestinationFolder="$(OutputPath)" Condition="Exists('$(_AppProxyRuntimeConfig)')" />
   </Target>
 </Project>

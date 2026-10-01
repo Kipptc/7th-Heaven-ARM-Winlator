@@ -184,7 +184,7 @@
                 </StackPanel>
 
 
-                <ListView x:Name="lstSubscriptions" Grid.Column="1" 
+                <ListView x:Name="lstSubscriptions" Grid.Column="1"
                           ItemsSource="{Binding SubscriptionList}" 
                           VirtualizingPanel.IsVirtualizing="false"
                           MaxHeight="166"

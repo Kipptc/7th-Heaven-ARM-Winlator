@@ -313,6 +313,12 @@ namespace Iros.Workshop
             private string _dest;
             private bool HasProcessed { get; set; } = false;
 
+            private void LogInstallStage(string stage)
+            {
+                long managedMiB = GC.GetTotalMemory(false) / (1024 * 1024);
+                Sys.Message(new WMessage($"Install {Mod?.Name}: {stage}; managed memory {managedMiB} MiB",
+                    WMessageLogLevel.LogOnly));
+            }
 
             private void ProcessDownload(object state)
             {
@@ -328,18 +334,20 @@ namespace Iros.Workshop
                 {
                     string source = Path.Combine(Sys.Settings.LibraryLocation, "temp", FileName);
                     _dest = Path.Combine(Sys.Settings.LibraryLocation, FileName);
+                    LogInstallStage($"starting from {source} ({new FileInfo(source).Length} bytes)");
 
-                    byte[] sig = new byte[4];
+                    byte[] sig = new byte[6];
                     int isig = 0;
                     using (var fs = new FileStream(source, FileMode.Open, FileAccess.Read))
                     {
-                        fs.ReadExactly(sig, 0, 4);
+                        fs.ReadExactly(sig, 0, sig.Length);
                         isig = BitConverter.ToInt32(sig, 0);
                         fs.Close();
                     }
 
                     if (isig == AppWrapper.IrosArc.SIG)
                     {
+                        LogInstallStage("validating IRO archive");
                         //plain IRO file, just move into place
                         using (var iro = new AppWrapper.IrosArc(source))
                             if (!iro.CheckValid())
@@ -349,17 +357,33 @@ namespace Iros.Workshop
 
                         File.Copy(source, _dest, overwrite: true);
                         File.Delete(source);
+                        LogInstallStage("IRO copy finished");
+                    }
+                    else if (WineEnvironment.IsRunningInWine() && Native7zExtractor.Is7zArchive(sig))
+                    {
+                        LogInstallStage("starting isolated ARM64 7z extraction");
+                        SetPercentComplete?.Invoke(50);
+                        bool containsIro = Native7zExtractor.Extract(source, _dest, ExtractInto);
+                        if (!containsIro && _dest.EndsWith(".iro", StringComparison.OrdinalIgnoreCase))
+                            _dest = _dest.Substring(0, _dest.Length - 4);
+                        LogInstallStage("isolated ARM64 7z extraction finished");
+                        File.Delete(source);
+                        LogInstallStage("temporary archive removed");
                     }
                     else
                     {
                         using (var fs = new FileStream(source, FileMode.Open, FileAccess.Read))
                         {
-                            var archive = ArchiveFactory.OpenArchive(fs);
+                            LogInstallStage("opening compressed archive");
+                            using var archive = ArchiveFactory.OpenArchive(fs);
+                            LogInstallStage("compressed archive opened");
                             var iroEnt = archive.Entries.FirstOrDefault(e => Path.GetExtension(e.Key).Equals(".iro", StringComparison.InvariantCultureIgnoreCase));
                             if (iroEnt != null)
                             {
+                                LogInstallStage($"extracting IRO entry {iroEnt.Key}");
                                 SetPercentComplete?.Invoke(50);
                                 iroEnt.WriteToFile(_dest);
+                                LogInstallStage("IRO entry extracted");
                             }
                             else
                             {
@@ -372,7 +396,9 @@ namespace Iros.Workshop
                                 using (var reader = archive.ExtractAllEntries())
                                 {
                                     var entries = archive.Entries.ToArray();
+                                    LogInstallStage($"extracting {entries.Length} archive entries");
                                     int count = 0;
+                                    int nextProgressLog = 10;
                                     while (reader.MoveToNextEntry())
                                     {
                                         if (!reader.Entry.IsDirectory)
@@ -387,13 +413,20 @@ namespace Iros.Workshop
                                         count++;
                                         float prog = (float)count / (float)entries.Length;
                                         SetPercentComplete?.Invoke((int)(50 * prog) + 50); // start at 50% go up to 100%
+                                        int extractionPercent = (int)(100 * prog);
+                                        if (extractionPercent >= nextProgressLog)
+                                        {
+                                            LogInstallStage($"extracted {count}/{entries.Length} entries ({extractionPercent}%)");
+                                            nextProgressLog = extractionPercent + 10;
+                                        }
                                     }
+                                    LogInstallStage("archive entries extracted");
                                 }
                             }
-                            fs.Close();
                         }
 
                         File.Delete(source);
+                        LogInstallStage("temporary archive removed");
                     }
                 }
                 catch (Exception e)
@@ -404,6 +437,7 @@ namespace Iros.Workshop
 
 
                 HasProcessed = true; // if reached this point then successfully processed the download with no error
+                LogInstallStage("archive processing finished");
                 SetPercentComplete?.Invoke(100);
                 Complete();
             }
@@ -417,6 +451,8 @@ namespace Iros.Workshop
                     return;
                 }
 
+                LogInstallStage("starting mod import");
+
                 InstalledItem inst = Sys.Library.GetItem(Mod.ID);
                 bool isIro = Path.GetExtension(_dest) == ".iro";
                 string modName = Mod?.Name;
@@ -429,6 +465,7 @@ namespace Iros.Workshop
                 try
                 {
                     Mod = ModImporter.ImportMod(_dest, modName, isIro, noCopy: true); // noCopy set to true because ProcessDownload() already copied the downloaded mod to the 'mods' library folder
+                    LogInstallStage("mod import finished");
                 }
                 catch (Exception ex)
                 {
@@ -445,8 +482,14 @@ namespace Iros.Workshop
                     Sys.Message(new WMessage($"[{StringKey.Updated}] {Mod.Name}") { TextTranslationKey = StringKey.Updated });
                 }
 
-                Sys.SetStatus(Mod.ID, ModStatus.Installed);
-                Sys.SaveLibrary();
+                // ImportMod already updates the library, persists it, and emits Installed.
+                // Repeating those operations on Wine rebuilds WPF lists during the next
+                // queued download and increases pressure on the translated runtime.
+                if (!WineEnvironment.IsRunningInWine())
+                {
+                    Sys.SetStatus(Mod.ID, ModStatus.Installed);
+                    Sys.SaveLibrary();
+                }
             }
 
             public override void Schedule()

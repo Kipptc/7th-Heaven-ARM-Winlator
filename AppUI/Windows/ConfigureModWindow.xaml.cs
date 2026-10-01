@@ -1,4 +1,5 @@
 ﻿using AppUI.ViewModels;
+using AppCore;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -26,6 +27,12 @@ namespace AppUI.Windows
         public ConfigureModWindow()
         {
             InitializeComponent();
+
+            if (WineEnvironment.IsRunningInWine())
+            {
+                imgOption.Visibility = Visibility.Collapsed;
+                imgWinePreview.Visibility = Visibility.Visible;
+            }
 
             ViewModel = new ConfigureModViewModel();
             this.DataContext = ViewModel;

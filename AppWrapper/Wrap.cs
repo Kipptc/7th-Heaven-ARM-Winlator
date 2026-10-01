@@ -8,6 +8,7 @@
 using Iros;
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -16,7 +17,7 @@ using static AppWrapper.Win32;
 
 namespace AppWrapper {
     public static class Wrap {
-        private static Dictionary<IntPtr, VArchiveData> _varchives = new();
+        private static ConcurrentDictionary<IntPtr, VArchiveData> _varchives = new();
         private static Dictionary<string, List<OverrideFile>> _mappedFiles = new();
         private static Dictionary<IntPtr, Queue<string>> _foundMatches = new();
         private static RuntimeProfile _profile;
@@ -152,7 +153,9 @@ namespace AppWrapper {
                 DebugLogger.WriteLine($"\nLoading hext patches:");
 
                 foreach (var mod in _profile.Mods.AsEnumerable().Reverse()) {
-                    foreach (string file in mod.GetPathOverrideNames("hext")) {
+                    // Several active folders can contain the same relative Hext name.
+                    // GetOverrides already returns every matching file for that name.
+                    foreach (string file in mod.GetPathOverrideNames("hext").Distinct(StringComparer.OrdinalIgnoreCase)) {
                         foreach (var of in mod.GetOverrides("hext\\" + file)) {
                             System.IO.Stream s;
                             if (of.Archive == null) {
@@ -160,7 +163,7 @@ namespace AppWrapper {
                             } else {
                                 s = of.Archive.GetData(of.File);
                             }
-                            DebugLogger.WriteLine($">> Applying hext patch {file} from mod {mod.BaseFolder}");
+                            DebugLogger.WriteLine($">> Applying hext patch {of.File}");
                             try {
                                 HexPatch.Apply(s);
                             } catch (Exception ex) {
@@ -178,7 +181,7 @@ namespace AppWrapper {
                         if (archive == null)
                             AddFolderFilesToMappedFiles(Path.Combine(mod.BaseFolder, cFolder.Folder), cFolder);
                         else
-                            AddIROFilesToMappedFiles(cFolder.Folder, cFolder, archive);
+                            AddIROFilesToMappedFiles(cFolder.Folder, cFolder, archive, mod.PreparedAudioFiles);
                     }
 
                     foreach (var folder in mod.ExtraFolders)
@@ -187,7 +190,7 @@ namespace AppWrapper {
                         if (archive == null)
                             AddFolderFilesToMappedFiles(Path.Combine(mod.BaseFolder, folder), null);
                         else
-                            AddIROFilesToMappedFiles(folder, null, archive);
+                            AddIROFilesToMappedFiles(folder, null, archive, mod.PreparedAudioFiles);
                     }
 
                     if (mod.Conditionals.Count + mod.ExtraFolders.Count == 0)
@@ -196,11 +199,14 @@ namespace AppWrapper {
                         if (archive == null)
                             AddFolderFilesToMappedFiles(mod.BaseFolder, null);
                         else
-                            AddIROFilesToMappedFiles("", null, archive);
+                            AddIROFilesToMappedFiles("", null, archive, mod.PreparedAudioFiles);
                     }
                 }
 
                 DebugLogger.WriteLine($"\nWrapper startup complete.");
+                foreach (var movie in _mappedFiles.Where(p => p.Key.StartsWith("movies\\", StringComparison.OrdinalIgnoreCase)))
+                    foreach (var file in movie.Value)
+                        DebugLogger.WriteLine($">> Movie mapping {movie.Key} => {file.File}");
                 DebugLogger.WriteLine($"\nListening for game actions...");
             } catch (Exception e) {
                 DebugLogger.WriteLine(e.ToString());
@@ -231,7 +237,7 @@ namespace AppWrapper {
             System.GC.WaitForFullGCComplete();
         }
 
-        private static void AddIROFilesToMappedFiles(string folderPath, ConditionalFolder cFolder, IrosArc archive)
+        private static void AddIROFilesToMappedFiles(string folderPath, ConditionalFolder cFolder, IrosArc archive, Dictionary<string, string> preparedAudioFiles)
         {
             foreach (string filename in archive.AllFileNames())
             {
@@ -246,13 +252,17 @@ namespace AppWrapper {
 
                     if (_mappedFiles.TryGetValue(fileKey, out List<OverrideFile> overrideFiles))
                     {
+                        string preparedFile = null;
+                        preparedAudioFiles?.TryGetValue(filename, out preparedFile);
+                        if (preparedFile != null && !File.Exists(preparedFile))
+                            throw new FileNotFoundException("Prepared mod audio file is missing; press Play again in 7th Heaven.", preparedFile);
                         overrideFiles.Add(new OverrideFile()
                         {
-                            File = filename,
+                            File = preparedFile ?? filename,
                             CFolder = cFolder,
                             CName = fileKey,
                             Size = archive.GetFileSize(filename),
-                            Archive = archive
+                            Archive = preparedFile == null ? archive : null
                         });
                     }
                 }
@@ -294,9 +304,8 @@ namespace AppWrapper {
         {
             int ret = 0;
 
-            if (_varchives.ContainsKey(hObject))
+            if (_varchives.TryRemove(hObject, out _))
             {
-                _varchives.Remove(hObject);
                 DebugLogger.WriteLine($">> HCloseHandle dummy handle {hObject}");
             }
 
@@ -327,9 +336,9 @@ namespace AppWrapper {
             if (lpDistanceToMoveHigh != IntPtr.Zero)
                 offset |= ((long)Marshal.ReadInt32(lpDistanceToMoveHigh) << 32);
 
-            if (_varchives.ContainsKey(hFile))
+            if (_varchives.TryGetValue(hFile, out VArchiveData archive))
             {
-                ret = _varchives[hFile].SetFilePointer(offset, (Win32.EMoveMethod)dwMoveMethod);
+                ret = archive.SetFilePointer(offset, (Win32.EMoveMethod)dwMoveMethod);
             }
             
             return ret;
@@ -340,11 +349,11 @@ namespace AppWrapper {
             int ret = 0;
 
             uint _numBytesRead = 0;
-            if (_varchives.ContainsKey(handle))
+            if (_varchives.TryGetValue(handle, out VArchiveData archive))
             {
-                ret = _varchives[handle].ReadFile(bytes, numBytesToRead, ref _numBytesRead);
-                byte[] tmp = BitConverter.GetBytes(_numBytesRead);
-                Util.CopyToIntPtr(tmp, numBytesRead, tmp.Length);
+                ret = archive.ReadFile(bytes, numBytesToRead, ref _numBytesRead);
+                if (numBytesRead != IntPtr.Zero)
+                    Marshal.WriteInt32(numBytesRead, unchecked((int)_numBytesRead));
                 return ret;
             }
 
@@ -371,6 +380,10 @@ namespace AppWrapper {
         {
             IntPtr ret = IntPtr.Zero;
 
+            bool isMovieRequest = lpFileName.EndsWith(".avi", StringComparison.OrdinalIgnoreCase) ||
+                lpFileName.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) ||
+                lpFileName.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
+            if (isMovieRequest) DebugLogger.WriteLine($">> Movie CreateFileW request: {lpFileName}");
             // Usually this check should be enough...
             bool isFF7GameFile = lpFileName.StartsWith(_profile.FF7Path, StringComparison.InvariantCultureIgnoreCase);
             // ...but if it fails, last resort is to check if the file exists in the game directory
@@ -447,6 +460,7 @@ namespace AppWrapper {
 
             //DebugLogger.WriteLine("Hooked CreateFileW for {0} under {1}", lpFileName, handle.ToInt32());
 
+            if (isMovieRequest) DebugLogger.WriteLine($">> Movie CreateFileW result: {ret} (0 means original file fallback)");
             return ret;
         }
 
@@ -599,11 +613,11 @@ namespace AppWrapper {
             byte[] tmp = Util.StructToBytes(_lpFileInformation);
             Util.CopyToIntPtr(tmp, lpFileInformation, tmp.Length);
 
-            if (result && _varchives.ContainsKey(hFile))
+            if (result && _varchives.TryGetValue(hFile, out VArchiveData archive))
             {
                 DebugLogger.DetailedWriteLine($">> Overriding GetFileInformationByHandle for dummy file {hFile}");
-                _lpFileInformation.FileSizeHigh = (uint)(_varchives[hFile].Size >> 32);
-                _lpFileInformation.FileSizeLow = (uint)(_varchives[hFile].Size & 0xffffffff);
+                _lpFileInformation.FileSizeHigh = (uint)(archive.Size >> 32);
+                _lpFileInformation.FileSizeLow = (uint)(archive.Size & 0xffffffff);
 
                 // Update again the struct
                 tmp = Util.StructToBytes(_lpFileInformation);
@@ -617,10 +631,11 @@ namespace AppWrapper {
         {
             // DebugLogger.DetailedWriteLine("DuplicateHandle on {0}", hSourceHandle);
 
-            if (_varchives.ContainsKey(hSourceHandle))
+            if (_varchives.TryGetValue(hSourceHandle, out VArchiveData archive))
             {
-                _varchives[lpTargetHandle] = _varchives[hSourceHandle];
-                DebugLogger.DetailedWriteLine($">> Duplicating dummy handle {hSourceHandle} to {lpTargetHandle}");
+                IntPtr targetHandle = Marshal.ReadIntPtr(lpTargetHandle);
+                _varchives[targetHandle] = archive;
+                DebugLogger.DetailedWriteLine($">> Duplicating dummy handle {hSourceHandle} to {targetHandle}");
             }
 
             return 1;
@@ -630,10 +645,10 @@ namespace AppWrapper {
         {
             uint ret = uint.MaxValue;
 
-            if (_varchives.ContainsKey(hFile))
+            if (_varchives.TryGetValue(hFile, out VArchiveData archive))
             {
                 DebugLogger.WriteLine($">> GetFileSize on dummy handle {hFile}");
-                ret = _varchives[hFile].GetFileSize(lpFileSizeHigh);
+                ret = archive.GetFileSize(lpFileSizeHigh);
             }
 
             return ret;
@@ -643,10 +658,10 @@ namespace AppWrapper {
         {
             int ret = 0;
 
-            if (_varchives.ContainsKey(hFile))
+            if (_varchives.TryGetValue(hFile, out VArchiveData archive))
             {
                 DebugLogger.WriteLine($">> GetFileSizeEx on dummy handle {hFile}");
-                byte[] tmp = BitConverter.GetBytes(_varchives[hFile].Size);
+                byte[] tmp = BitConverter.GetBytes(archive.Size);
                 Util.CopyToIntPtr(tmp, lpFileSize, tmp.Length);
 
                 ret = 1;
@@ -659,8 +674,8 @@ namespace AppWrapper {
         {
             int ret = 0;
 
-            if (_varchives.ContainsKey(hFile))
-                ret = _varchives[hFile].SetFilePointerEx(hFile, liDistanceToMove, lpNewFilePointer, (uint)dwMoveMethod);
+            if (_varchives.TryGetValue(hFile, out VArchiveData archive))
+                ret = archive.SetFilePointerEx(hFile, liDistanceToMove, lpNewFilePointer, (uint)dwMoveMethod);
 
             return ret;
         }

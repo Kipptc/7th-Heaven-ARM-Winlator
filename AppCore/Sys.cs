@@ -155,7 +155,8 @@ namespace Iros.Workshop
         {
             get
             {
-                return Path.Combine(SysFolder, "applog.txt");
+                string bannerlatorLogs = WineEnvironment.TryGetBannerlatorLogDirectory();
+                return Path.Combine(bannerlatorLogs ?? SysFolder, "applog.txt");
             }
         }
 
@@ -297,7 +298,16 @@ namespace Iros.Workshop
         {
             get
             {
-                return Sys.InstallPath != null ? Path.Combine(Sys.InstallPath, "FFNx.toml") : null;
+                string gameDirectory = Sys.InstallPath;
+                if (gameDirectory == null) return null;
+
+                string expectedPath = Path.Combine(gameDirectory, "FFNx.toml");
+                if (File.Exists(expectedPath) || !Directory.Exists(gameDirectory)) return expectedPath;
+
+                // A Wine-backed game directory can preserve the original file name's casing.
+                return Directory.EnumerateFiles(gameDirectory, "*", SearchOption.TopDirectoryOnly)
+                    .FirstOrDefault(path => string.Equals(Path.GetFileName(path), "FFNx.toml", StringComparison.OrdinalIgnoreCase))
+                    ?? expectedPath;
             }
         }
 
@@ -672,6 +682,8 @@ namespace Iros.Workshop
                 foreach (string folder in Directory.GetDirectories(Sys.Settings.LibraryLocation))
                 {
                     string name = Path.GetFileName(folder);
+                    // Internal playback cache, never a user-installed mod.
+                    if (name.Equals(".bannerlator-audio-cache", StringComparison.OrdinalIgnoreCase)) continue;
                     if (!name.EndsWith("temp", StringComparison.InvariantCultureIgnoreCase) && !Sys.Library.PendingDelete.Contains(name, StringComparer.InvariantCultureIgnoreCase))
                     {
                         if (!Sys.Library.Items.SelectMany(ii => ii.Versions).Any(v => v.InstalledLocation.Equals(name, StringComparison.InvariantCultureIgnoreCase)))

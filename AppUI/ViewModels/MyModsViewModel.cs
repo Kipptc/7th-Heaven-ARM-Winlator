@@ -615,7 +615,9 @@ namespace AppUI.ViewModels
                         Sys.Ping(pi.ModID);
                 }
 
+                Logger.Info($"Checking settings after activating mod {modID}.");
                 GameLauncher.SanityCheckSettings();
+                Logger.Info($"Finished checking settings for mod {modID}.");
             }
             else
             {
@@ -642,6 +644,7 @@ namespace AppUI.ViewModels
         private void DoActivate(Guid modID, bool reloadList = true)
         {
             if (!MainWindowViewModel.CheckAllowedActivate(modID)) return;
+            Logger.Info($"Activation approved for mod {modID}.");
 
             var mod = Sys.ActiveProfile.Items.FirstOrDefault(m => m.ModID == modID);
 
@@ -659,6 +662,7 @@ namespace AppUI.ViewModels
             }
 
             ModList.FirstOrDefault(m => m.InstallInfo.ModID == modID)?.RaiseIsActivePropertyChanged();
+            Logger.Info($"Active profile updated for mod {modID}.");
 
             if (reloadList)
             {
@@ -921,10 +925,12 @@ namespace AppUI.ViewModels
                 List<Constraint> modConstraints = GameLauncher.GetConstraints().Where(c => c.ModID.Equals(modToConfigure.InstallInfo.ModID)).ToList();
 
                 ConfigureModWindow modWindow = new ConfigureModWindow();
+                Logger.Info($"Opening configuration for mod {modToConfigure.InstallInfo.ModID}.");
                 modWindow.ViewModel.Init(info, imageReader, audioReader, modToConfigure.ActiveModInfo, modConstraints, pathToModXml);
 
                 // Open dialog for configuring settings - if true is returned then the settings are saved
                 bool? dialogResult = modWindow.ShowDialog();
+                Logger.Info($"Configuration window closed for mod {modToConfigure.InstallInfo.ModID} with result {dialogResult}.");
                 if (dialogResult.GetValueOrDefault(false) == true)
                 {
                     modToConfigure.ActiveModInfo.Settings = modWindow.ViewModel.GetSettings();

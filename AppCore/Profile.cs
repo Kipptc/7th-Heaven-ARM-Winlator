@@ -216,8 +216,10 @@ namespace Iros.Workshop {
             if (mod == null) return null;
             string location = System.IO.Path.Combine(Sys.Settings.LibraryLocation, mod.LatestInstalled.InstalledLocation);
             AppWrapper.ModInfo modinfo = null;
+            Dictionary<string, int> audioEntries = null;
             if (mod.LatestInstalled.InstalledLocation.EndsWith(".iro")) {
                 using (var arc = new AppWrapper.IrosArc(location)) {
+                    if (AppCore.WineEnvironment.IsRunningInWine()) audioEntries = AppWrapper.RuntimeMod.ReadAudioEntries(arc);
                     if (arc.HasFile("mod.xml")) {
                         var doc = new System.Xml.XmlDocument();
                         doc.Load(arc.GetData("mod.xml"));
@@ -236,12 +238,14 @@ namespace Iros.Workshop {
                     Settings.Add(new ProfileSetting() { ID = opt.ID, Value = opt.Default });
             }
 
-            return new AppWrapper.RuntimeMod(
+            var runtimeMod = new AppWrapper.RuntimeMod(
                 location,
                 modinfo.Conditionals.Where(f => IsActive(f.ActiveWhen)),
                 modinfo.ModFolders.Where(f => IsActive(f.ActiveWhen)).Select(f => f.Folder),
                 modinfo
                 );
+            runtimeMod.SetAudioEntries(audioEntries);
+            return runtimeMod;
         }
 
         /// <summary>

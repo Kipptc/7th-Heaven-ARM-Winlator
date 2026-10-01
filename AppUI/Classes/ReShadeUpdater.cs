@@ -211,6 +211,9 @@ namespace AppUI.Classes
 
         public static void Cleanup()
         {
+            // The graphics DLLs in a Wine game directory may belong to its compatibility layer.
+            if (WineEnvironment.IsRunningInWine()) return;
+
             if (File.Exists(Sys.PathToReShade))
             {
                 // ================================================================================================
@@ -265,6 +268,8 @@ namespace AppUI.Classes
 
         public static void Install()
         {
+            if (WineEnvironment.IsRunningInWine()) return;
+
             if (File.Exists(Sys.PathToReShade))
             {
                 // -- ReShade32.dll

@@ -17,6 +17,7 @@ namespace Iros.Workshop.ConfigSettings
         private Exception _lastException = null;
 
         private TomlTable _toml = null;
+        private readonly HashSet<string> _addedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         public FFNxConfigManager()
         {
@@ -36,10 +37,12 @@ namespace Iros.Workshop.ConfigSettings
         {
             try
             {
-                // first launch the Sys Path was not setup correctly yet so _toml is null
-                if (_toml == null) _pathToFFNxToml = Sys.PathToFFNxToml;
-
-                if (File.Exists(_pathToFFNxToml)) _toml = TomlSerializer.Deserialize<TomlTable>(File.ReadAllText(_pathToFFNxToml));
+                // The selected game can change after this manager is created.
+                _pathToFFNxToml = Sys.PathToFFNxToml;
+                _toml = File.Exists(_pathToFFNxToml)
+                    ? TomlSerializer.Deserialize<TomlTable>(File.ReadAllText(_pathToFFNxToml))
+                    : null;
+                _addedKeys.Clear();
             }
             catch (Exception ex)
             {
@@ -50,12 +53,22 @@ namespace Iros.Workshop.ConfigSettings
 
         public string Get(string key)
         {
-            if (_toml == null) return null;
-            return _toml[key].ToString();
+            if (_toml == null || !_toml.TryGetValue(key, out object value)) return null;
+            return value?.ToString();
         }
-
         public void Set(string key, string value)
         {
+            if (_toml == null) throw new InvalidDataException($"Cannot edit FFNx settings because {_pathToFFNxToml} was not loaded.");
+            if (!_toml.ContainsKey(key))
+            {
+                if (bool.TryParse(value, out bool boolValue)) _toml[key] = boolValue;
+                else if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long intValue)) _toml[key] = intValue;
+                else if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double doubleValue)) _toml[key] = doubleValue;
+                else _toml[key] = value.Trim('"');
+                _addedKeys.Add(key);
+                return;
+            }
+
             switch (_toml[key])
             {
                 case string s:
@@ -96,6 +109,7 @@ namespace Iros.Workshop.ConfigSettings
 
         public bool IsSetWithValue(string key, string value)
         {
+            if (_toml == null || !_toml.ContainsKey(key)) return false;
             switch (_toml[key])
             {
                 case string s:
@@ -128,7 +142,7 @@ namespace Iros.Workshop.ConfigSettings
 
         public bool HasKey(string key)
         {
-            return _toml.ContainsKey(key);
+            return _toml?.ContainsKey(key) == true;
         }
 
         public void Save()
@@ -216,17 +230,26 @@ namespace Iros.Workshop.ConfigSettings
                 }
             }
 
+            foreach (string key in _addedKeys)
+            {
+                object value = _toml[key];
+                string formattedValue = value switch
+                {
+                    bool b => b ? "true" : "false",
+                    string s => $"\"{s}\"",
+                    double d => d.ToString(CultureInfo.InvariantCulture),
+                    _ => value.ToString()
+                };
+                _write.Add($"{key} = {formattedValue}");
+            }
+
             File.WriteAllLines(_pathToFFNxToml, _write);
+            _addedKeys.Clear();
         }
 
         public void OverrideInternalKeys(bool debug = false)
         {
-            // first launch the Sys Path was not setup correctly yet so _toml is null
-            if(_toml == null)
-            {
-                _pathToFFNxToml = Sys.PathToFFNxToml;
-                Reload();
-            }
+            if (_toml == null || !string.Equals(_pathToFFNxToml, Sys.PathToFFNxToml, StringComparison.OrdinalIgnoreCase)) Reload();
             // Override known internal keys on save to preserve mod behavior override logic
             _toml["external_sfx_path"] = "sfx";
             _toml["external_sfx_ext"] = "ogg";

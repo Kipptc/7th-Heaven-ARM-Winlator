@@ -1,0 +1,9 @@
+diff --git a/portfile.cmake b/portfile.cmake
+--- a/portfile.cmake
++++ b/portfile.cmake
+@@ -19,4 +19,5 @@ vcpkg_from_github(
+         0041-add-const-for-opengl-definition.patch
+         0043-fix-miss-head.patch
+         0044-fix-vulkan-debug-callback-abi.patch
++        FFNx-ffmpeg-link-retry.patch
+ )

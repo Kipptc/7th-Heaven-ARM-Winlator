@@ -90,6 +90,11 @@ namespace AppUI.Classes
 
         public void CheckForUpdates(AppUpdateChannelOptions channel, bool manualCheck = false)
         {
+#if BANNERLATOR_BUILD
+            if (manualCheck)
+                MessageDialogWindow.Show("This Bannerlator beta is updated through its own installer. See the README for the current build.", "7th Heaven ARM updates", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+            return;
+#else
             DownloadItem download = new DownloadItem()
             {
                 Links = new List<string>() { LocationUtil.FormatHttpUrl(GetUpdateChannel(channel)) },
@@ -157,6 +162,7 @@ namespace AppUI.Classes
             });
 
             Sys.Downloads.AddToDownloadQueue(download);
+#endif
         }
 
         private void DownloadAndExtract(string url, string version)

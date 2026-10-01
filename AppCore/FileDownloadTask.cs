@@ -242,7 +242,7 @@ namespace AppCore
                     request.Headers.Range = new RangeHeaderValue(0, range);
                 }
 
-                HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+                using HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
 
                 if (ContentLength == -1 && !_checkedContentRange)
                 {
@@ -251,7 +251,7 @@ namespace AppCore
                     _responseUri = response.RequestMessage.RequestUri;
                 }
 
-                Stream responseStream = response.Content.ReadAsStream();
+                using Stream responseStream = response.Content.ReadAsStream();
 
                 FileMode fileMode = FileMode.Append;
 
@@ -260,12 +260,12 @@ namespace AppCore
                     fileMode = FileMode.Create;
                 }
 
-                FileStream fs = new FileStream(_destination, fileMode, FileAccess.Write, FileShare.ReadWrite);
+                using FileStream fs = new FileStream(_destination, fileMode, FileAccess.Write, FileShare.ReadWrite);
+                byte[] buffer = new byte[_chunkSize];
 
                 while (AllowedToRun && !IsCanceled)
                 {
                     _isStarted = true;
-                    byte[] buffer = new byte[_chunkSize];
                     int bytesRead = await responseStream.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
 
                     if (bytesRead == 0) break;
@@ -280,8 +280,6 @@ namespace AppCore
                 }
 
                 await fs.FlushAsync();
-                fs.Close();
-                responseStream.Close();
 
                 switch (_fdtMode)
                 {

@@ -28,6 +28,13 @@ namespace AppProxy
         private static MethodInfo? _mHGetFileSizeEx = null;
         private static MethodInfo? _mHGetFileAttributesExW = null;
 
+        private delegate IntPtr CreateFileWHandler(string path, FileAccess access, FileShare share, IntPtr securityAttributes, FileMode disposition, FileAttributes attributes, IntPtr templateFile);
+        private delegate int ReadFileHandler(IntPtr handle, IntPtr bytes, uint bytesToRead, IntPtr bytesRead, IntPtr overlapped);
+        private delegate int SetFilePointerExHandler(IntPtr handle, long distance, IntPtr newPointer, uint moveMethod);
+        private static CreateFileWHandler? _createFileW;
+        private static ReadFileHandler? _readFile;
+        private static SetFilePointerExHandler? _setFilePointerEx;
+
         [StructLayout(LayoutKind.Sequential)]
         public struct HostExports
         {
@@ -76,7 +83,10 @@ namespace AppProxy
                 _exports->GetFileSizeEx = &HGetFileSizeEx;
                 _exports->GetFileAttributesExW = &HGetFileAttributesExW;
 
-                lib = AssemblyLoadContext.GetLoadContext(typeof(Proxy).Assembly).LoadFromAssemblyPath(Path.Combine(Directory.GetCurrentDirectory(), "AppWrapper.dll"));
+                string gameDirectory = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
+                AssemblyLoadContext loadContext = AssemblyLoadContext.GetLoadContext(typeof(Proxy).Assembly)
+                    ?? throw new InvalidOperationException("AppProxy has no assembly load context.");
+                lib = loadContext.LoadFromAssemblyPath(Path.Combine(gameDirectory, "AppWrapper.dll"));
                 t = lib.GetType("AppWrapper.Wrap");
 
                 if (t != null)
@@ -98,13 +108,28 @@ namespace AppProxy
                     _mHGetFileSize = t.GetMethod("HGetFileSize", BindingFlags.Static | BindingFlags.Public);
                     _mHGetFileSizeEx = t.GetMethod("HGetFileSizeEx", BindingFlags.Static | BindingFlags.Public);
                     _mHGetFileAttributesExW = t.GetMethod("HGetFileAttributesExW", BindingFlags.Static | BindingFlags.Public);
+                    _createFileW = (CreateFileWHandler?)_mHCreateFileW?.CreateDelegate(typeof(CreateFileWHandler));
+                    _readFile = (ReadFileHandler?)_mHReadFile?.CreateDelegate(typeof(ReadFileHandler));
+                    _setFilePointerEx = (SetFilePointerExHandler?)_mHSetFilePointerEx?.CreateDelegate(typeof(SetFilePointerExHandler));
                 }
 
-                if (_mRun != null) _mRun.Invoke(null, new object[] { Process.GetCurrentProcess(), Type.Missing });
+                if (_mRun != null) _mRun.Invoke(null, new object[] { Process.GetCurrentProcess(), Path.Combine(gameDirectory, ".7thWrapperProfile") });
             }
             catch (Exception ex)
             {
                 Debug.WriteLine(ex.ToString());
+                try
+                {
+                    string gameDirectory = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
+                    string logDirectory = gameDirectory;
+                    if (Directory.Exists(@"D:\7h-ARM"))
+                    {
+                        logDirectory = @"D:\7h-ARM\logs";
+                        Directory.CreateDirectory(logDirectory);
+                    }
+                    File.AppendAllText(Path.Combine(logDirectory, "AppProxy.log"), ex + Environment.NewLine);
+                }
+                catch { }
             }
 
             return 0;
@@ -119,6 +144,9 @@ namespace AppProxy
 
                 t = null;
                 lib = null;
+                _createFileW = null;
+                _readFile = null;
+                _setFilePointerEx = null;
 
                 _exports->Shutdown = null;
                 _exports->CreateFileW = null;
@@ -154,7 +182,7 @@ namespace AppProxy
 
             try
             {
-                if (_mHCreateFileW != null) ret = (IntPtr)(_mHCreateFileW.Invoke(null, new object[] { new string((char*)lpFileName), (System.IO.FileAccess)dwDesiredAccess, (System.IO.FileShare)dwShareMode, new IntPtr(lpSecurityAttributes), (System.IO.FileMode)dwCreationDisposition, (System.IO.FileAttributes)dwFlagsAndAttributes, new IntPtr(hTemplateFile) }) ?? IntPtr.Zero);
+                if (_createFileW != null) ret = _createFileW(new string((char*)lpFileName), (FileAccess)dwDesiredAccess, (FileShare)dwShareMode, new IntPtr(lpSecurityAttributes), (FileMode)dwCreationDisposition, (FileAttributes)dwFlagsAndAttributes, new IntPtr(hTemplateFile));
             }
             catch (Exception ex)
             {
@@ -171,7 +199,7 @@ namespace AppProxy
 
             try
             {
-                if (_mHReadFile != null) ret = (int)(_mHReadFile.Invoke(null, new object[] { new IntPtr(handle), new IntPtr(bytes), numBytesToRead, new IntPtr(numBytesRead), new IntPtr(overlapped) }) ?? 0);
+                if (_readFile != null) ret = _readFile(new IntPtr(handle), new IntPtr(bytes), numBytesToRead, new IntPtr(numBytesRead), new IntPtr(overlapped));
             }
             catch (Exception ex)
             {
@@ -273,7 +301,7 @@ namespace AppProxy
 
             try
             {
-                if (_mHSetFilePointerEx != null) ret = (int)(_mHSetFilePointerEx.Invoke(null, new object[] { new IntPtr(hFile), liDistanceToMove, new IntPtr(lpNewFilePointer), dwMoveMethod }) ?? 0);
+                if (_setFilePointerEx != null) ret = _setFilePointerEx(new IntPtr(hFile), liDistanceToMove, new IntPtr(lpNewFilePointer), dwMoveMethod);
             }
             catch (Exception ex)
             {

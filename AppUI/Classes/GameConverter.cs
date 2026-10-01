@@ -157,7 +157,7 @@ namespace AppUI.Classes
             return ret;
         }
 
-        public bool IsGamePirated()
+        public bool IsGamePirated(bool allowMissingFFNxSteamApi = false)
         {
             string[] foldersToExclude = new string[] { "The_Reunion", "mods", "direct" }; // folders to skip in check
 
@@ -189,10 +189,15 @@ namespace AppUI.Classes
             }
 
             // check if steam api is a genuine one
-            using (FileStream fs = new FileStream(Path.Combine(InstallPath, "FFNx_steam_api.dll"), FileMode.Open))
+            string ffnxSteamApiPath = Path.Combine(InstallPath, "FFNx_steam_api.dll");
+            if (!File.Exists(ffnxSteamApiPath) && !allowMissingFFNxSteamApi) return true;
+            if (File.Exists(ffnxSteamApiPath))
             {
-                byte[] currentHash = SHA1.HashData(fs);
-                if (!currentHash.SequenceEqual(Convert.FromHexString("03BD9F3E352553A0AF41F5FE006F6249A168C243"))) return true;
+                using (FileStream fs = new FileStream(ffnxSteamApiPath, FileMode.Open))
+                {
+                    byte[] currentHash = SHA1.HashData(fs);
+                    if (!currentHash.SequenceEqual(Convert.FromHexString("03BD9F3E352553A0AF41F5FE006F6249A168C243"))) return true;
+                }
             }
 
             // check if given exe is a genuine one

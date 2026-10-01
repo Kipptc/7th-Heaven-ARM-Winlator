@@ -872,24 +872,6 @@
             <Setter.Value>
                 <ControlTemplate TargetType="{x:Type ComboBox}">
                     <Grid>
-                        <VisualStateManager.VisualStateGroups>
-                            <VisualStateGroup x:Name="CommonStates">
-                                <VisualState x:Name="Normal" />
-                                <VisualState x:Name="MouseOver" />
-                                <VisualState x:Name="Disabled"/>
-                            </VisualStateGroup>
-                            <VisualStateGroup x:Name="EditStates">
-                                <VisualState x:Name="Editable">
-                                    <Storyboard>
-                                        <ObjectAnimationUsingKeyFrames Storyboard.TargetProperty="(UIElement.Visibility)" Storyboard.TargetName="ContentSite">
-                                            <DiscreteObjectKeyFrame KeyTime="0" Value="{x:Static Visibility.Hidden}" />
-                                        </ObjectAnimationUsingKeyFrames>
-                                    </Storyboard>
-                                </VisualState>
-                                <VisualState x:Name="Uneditable" />
-                            </VisualStateGroup>
-                        </VisualStateManager.VisualStateGroups>
-
                         <ToggleButton x:Name="ToggleButton"
                                       Template="{StaticResource ComboBoxToggleButton}"
                                       Background="{TemplateBinding Background}"

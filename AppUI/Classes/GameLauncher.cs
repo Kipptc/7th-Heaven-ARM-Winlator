@@ -15,6 +15,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Xml;
@@ -80,6 +82,7 @@ namespace AppUI.Classes
         private extern static IntPtr FindWindow(string lpClassName, string lpWindowName);
 
         private static Process ff7Proc;
+        internal static bool IsExternalLaunchPrepared { get; private set; }
 
         internal static bool IsLanguageSelectorSupportedEdition()
         {
@@ -121,12 +124,41 @@ namespace AppUI.Classes
 
         public static async Task<bool> LaunchGame(bool varDump, bool debug, bool launchWithNoMods = false)
         {
+            Logger.Info($"LaunchGame entered (no mods: {launchWithNoMods}, debug: {debug}).");
+            IsExternalLaunchPrepared = false;
             bool runAsVanilla = false, didDisableReunion = false;
             string vanillaMsg = "";
             RuntimeProfile runtimeProfile = null;
 
             MainWindowViewModel.SaveActiveProfile();
             Sys.Save();
+
+            if (WineEnvironment.IsRunningInWine() &&
+                Sys.Settings.FF7InstalledVersion == FF7Version.Steam &&
+                !launchWithNoMods && Sys.ActiveProfile?.ActiveItems.Count > 0)
+            {
+                return PrepareWineExternalLaunch(debug);
+            }
+
+            // A vanilla launch under Wine should leave the Steam game and the
+            // compatibility layer's graphics DLLs untouched.
+            if (WineEnvironment.IsRunningInWine() &&
+                (launchWithNoMods || Sys.ActiveProfile?.ActiveItems.Count == 0))
+            {
+                Instance.RaiseProgressChanged("Launching FF7 without changing game files in Wine...");
+                string launchPath = GetLaunchExecutablePath();
+                if (Sys.Settings.FF7InstalledVersion == FF7Version.Steam &&
+                    !FFNxDriverUpdater.IsAlreadyInstalled())
+                {
+                    string steamLauncher = Path.Combine(Path.GetDirectoryName(launchPath), "FF7_Launcher.exe");
+                    if (File.Exists(steamLauncher)) launchPath = steamLauncher;
+                }
+                else if (Sys.Settings.FF7InstalledVersion == FF7Version.Steam)
+                {
+                    Instance.RaiseProgressChanged("FFNx is installed; starting the Steam 2013 game executable directly.");
+                }
+                return await LaunchFF7Exe(cleanupGameFiles: false, executablePath: launchPath);
+            }
 
             GameConverter converter = new GameConverter(Path.GetDirectoryName(Sys.Settings.FF7Exe));
             converter.MessageSent += GameConverter_MessageSent;
@@ -431,7 +463,16 @@ namespace AppUI.Classes
                 // Copy 7thWrapper* dlls to FF7
                 //
                 Instance.RaiseProgressChanged(ResourceHelper.Get(StringKey.CopyingEasyHookToFf7PathIfNotFoundOrOlder));
-                Copy7thWrapperDlls();
+                try
+                {
+                    Copy7thWrapperDlls();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error(ex);
+                    Instance.RaiseProgressChanged(ex.Message, NLog.LogLevel.Error);
+                    return false;
+                }
 
                 //
                 // Inherit FFNx Config keys from each mod
@@ -546,7 +587,7 @@ namespace AppUI.Classes
             if (runAsVanilla)
             {
                 Instance.RaiseProgressChanged(vanillaMsg);
-                await LaunchFF7Exe();
+                if (!await LaunchFF7Exe()) return false;
 
                 if (didDisableReunion)
                 {
@@ -585,12 +626,12 @@ namespace AppUI.Classes
 
                 Instance.RaiseProgressChanged(ResourceHelper.Get(StringKey.AttemptingToInjectWithEasyHook));
 
-                while (!didInject)
+                int launchAttempts = 0;
+                while (!didInject && launchAttempts++ < 2)
                 {
                     try
                     {
-                        await LaunchFF7Exe();
-                        didInject = true;
+                        didInject = await LaunchFF7Exe();
                     }
                     catch (Exception e)
                     {
@@ -756,6 +797,189 @@ namespace AppUI.Classes
             Instance.RaiseProgressChanged(message, logLevel);
         }
 
+        private static bool PrepareWineExternalLaunch(bool debug)
+        {
+            Logger.Info("Preparing Bannerlator external launch.");
+            bool configBackedUp = false;
+            string stage = "checking the game installation";
+
+            try
+            {
+                string gameDirectory = Path.GetDirectoryName(Sys.Settings.FF7Exe);
+                if (string.IsNullOrWhiteSpace(gameDirectory))
+                {
+                    Instance.RaiseProgressChanged("Select the FF7 executable in General Settings first.", NLog.LogLevel.Error);
+                    return false;
+                }
+
+                string appDirectory = AppContext.BaseDirectory;
+                try { WineEnvironment.ExportFFNxLogIfNewer(Sys.Settings.FF7Exe); }
+                catch (Exception ex) { Logger.Warn(ex, "Could not export the previous FFNx log."); }
+                string stagedFFNxConfig = Path.Combine(appDirectory, "FFNx.toml");
+                string runtimeRoot = Path.Combine(appDirectory, "runtime-x86");
+                string profilePath = Path.Combine(gameDirectory, ".7thWrapperProfile");
+                string runtimeConfigPath = Path.Combine(gameDirectory, "7thHeavenRuntime.ini");
+                bool replacingPriorLoader = File.Exists(runtimeConfigPath) &&
+                    File.Exists(Path.Combine(gameDirectory, "AppProxy.dll")) &&
+                    File.Exists(Path.Combine(gameDirectory, "nethost.dll"));
+                if (!File.Exists(GetLaunchExecutablePath()))
+                {
+                    Instance.RaiseProgressChanged("Steam 2013 FF7 and FFNx must be installed before preparing mods for Bannerlator.", NLog.LogLevel.Error);
+                    return false;
+                }
+
+                if (!FFNxDriverUpdater.IsAlreadyInstalled())
+                {
+                    new FFNxDriverUpdater().DownloadAndExtractLatestVersion(Sys.Settings.FFNxUpdateChannel);
+                    Instance.RaiseProgressChanged("Installing FFNx. Press Play again after installation finishes.");
+                    return false;
+                }
+
+                stage = "deploying custom FFNx files";
+                int deployedFiles = FFNxDeployment.Apply(gameDirectory, appDirectory);
+                if (deployedFiles > 0) Instance.RaiseProgressChanged($"Applied {deployedFiles} custom FFNx files.");
+
+                stage = "importing staged FFNx.toml";
+                bool importedFFNxConfig = ImportStagedFFNxConfig(stagedFFNxConfig);
+                if (!File.Exists(Sys.PathToFFNxToml))
+                {
+                    Instance.RaiseProgressChanged($"FFNx.toml was not found at the selected game's path: {Sys.PathToFFNxToml}", NLog.LogLevel.Error);
+                    return false;
+                }
+
+                if (!Directory.Exists(Path.Combine(runtimeRoot, "host", "fxr")) ||
+                    !File.Exists(Path.Combine(appDirectory, "AppLoader.dll")))
+                {
+                    Instance.RaiseProgressChanged("This package does not include the Win32 mod loader and private x86 .NET runtime.", NLog.LogLevel.Error);
+                    return false;
+                }
+
+                GameConverter converter = new GameConverter(gameDirectory);
+                stage = "checking the Steam game files";
+                if (converter.IsGamePirated(allowMissingFFNxSteamApi: true))
+                {
+                    Instance.RaiseProgressChanged(ResourceHelper.Get(StringKey.ErrorCodeYarr), NLog.LogLevel.Error);
+                    return false;
+                }
+
+                stage = "checking active mod compatibility";
+                if (!SanityCheckCompatibility() || !SanityCheckSettings() || !VerifyOrdering())
+                {
+                    Instance.RaiseProgressChanged("The active profile did not pass mod compatibility checks.", NLog.LogLevel.Error);
+                    return false;
+                }
+
+                stage = "building the mod runtime profile";
+                RuntimeProfile runtimeProfile = CreateRuntimeProfile();
+                if (debug)
+                {
+                    runtimeProfile.Options |= RuntimeOptions.DetailedLog;
+                    runtimeProfile.LogFile = Path.Combine(gameDirectory, "log.txt");
+                }
+
+                stage = "reading FFNx.toml";
+                Sys.FFNxConfig.Reload();
+                if (!Sys.FFNxConfig.HasKey("renderer_backend"))
+                    throw new InvalidDataException($"FFNx configuration could not be read from {Sys.PathToFFNxToml}.");
+                Sys.FFNxConfig.Backup(true);
+                configBackedUp = true;
+                stage = "applying FFNx mod settings";
+                Sys.FFNxConfig.OverrideInternalKeys(debug);
+                // External launches have no exit callback to restore the TOML.
+                // Clear the previous profile's SFX flag before active mods set it.
+                Sys.FFNxConfig.Set("use_external_sfx", "false");
+                foreach (RuntimeMod mod in runtimeProfile.Mods)
+                {
+                    foreach (FFNxFlag flag in mod.FFNxConfig)
+                    {
+                        bool addConfig = true;
+                        foreach (var attr in flag.Attributes)
+                        {
+                            foreach (Iros.Workshop.ProfileItem item in Sys.ActiveProfile.ActiveItems)
+                            {
+                                foreach (ProfileSetting setting in item.Settings)
+                                {
+                                    if (setting.ID == attr.Key && setting.Value != attr.Value) addConfig = false;
+                                }
+                            }
+                        }
+                        if (!addConfig || !Sys.FFNxConfig.HasKey(flag.Key)) continue;
+                        if (flag.Values.Count > 0) Sys.FFNxConfig.Set(flag.Key, flag.Values);
+                        else Sys.FFNxConfig.Set(flag.Key, flag.Value);
+                    }
+                }
+                Sys.FFNxConfig.Save();
+
+                stage = "writing the mod runtime profile";
+                runtimeProfile = CreateRuntimeProfile();
+                stage = "preparing mod audio files";
+                string audioCache = Path.Combine(Sys.Settings.LibraryLocation, ".bannerlator-audio-cache");
+                foreach (RuntimeMod mod in runtimeProfile.Mods)
+                {
+                    Instance.RaiseProgressChanged($"Preparing audio: {Path.GetFileName(mod.BaseFolder)}");
+                    int audioFiles = mod.PrepareAudioFiles(audioCache);
+                    Logger.Info($"Prepared {audioFiles} physical audio files for {mod.BaseFolder}.");
+                }
+                stage = "writing the mod runtime profile";
+                // The game is started outside 7th Heaven in Bannerlator, so
+                // always leave a wrapper trace for failures in that process.
+                string bannerlatorGameLogs = WineEnvironment.TryGetBannerlatorLogDirectory();
+                if (bannerlatorGameLogs != null)
+                    File.Copy(Sys.PathToFFNxToml, Path.Combine(bannerlatorGameLogs, "FFNx-effective.toml"), true);
+                runtimeProfile.LogFile = Path.Combine(bannerlatorGameLogs ?? gameDirectory, "7thWrapper.log");
+                if (debug)
+                {
+                    runtimeProfile.Options |= RuntimeOptions.DetailedLog;
+                    runtimeProfile.LogFile = Path.Combine(bannerlatorGameLogs ?? gameDirectory, "log.txt");
+                }
+                using (FileStream stream = new FileStream(profilePath, FileMode.Create))
+                    Util.SerializeBinary(runtimeProfile, stream);
+
+                File.WriteAllText(runtimeConfigPath, $"[Runtime]\r\nX86DotnetRoot={runtimeRoot}\r\n", Encoding.Unicode);
+                stage = "installing the Win32 mod loader";
+                Copy7thWrapperDlls(replacingPriorLoader);
+
+                stage = "configuring Wine to load the mod DLL";
+                using (RegistryKey gameOverrides = Registry.CurrentUser.CreateSubKey(@"Software\Wine\AppDefaults\ff7_en.exe\DllOverrides"))
+                {
+                    if (gameOverrides == null) throw new IOException("Wine's per-game DLL override registry key could not be opened.");
+                    gameOverrides.SetValue("dinput", "native,builtin", RegistryValueKind.String);
+                }
+
+                // Consume the staged file only after preparation succeeds, so a
+                // failed Play attempt can retry the same configuration.
+                if (importedFFNxConfig) File.Delete(stagedFFNxConfig);
+                IsExternalLaunchPrepared = true;
+                Instance.RaiseProgressChanged("Mods are ready. Launch FF7 from Bannerlator's Steam game shortcut targeting ff7_en.exe.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Bannerlator preparation failed while {stage}: {ex}");
+                if (configBackedUp) Sys.FFNxConfig.RestoreBackup(true);
+                Instance.RaiseProgressChanged($"Could not prepare mods for Bannerlator while {stage}: {ex.Message}", NLog.LogLevel.Error);
+                return false;
+            }
+        }
+
+        private static bool ImportStagedFFNxConfig(string source)
+        {
+            string destination = Path.GetFullPath(Sys.PathToFFNxToml);
+            if (!File.Exists(source) || string.Equals(Path.GetFullPath(source), destination, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // Validate before replacing the game's working configuration.
+            var config = Tomlyn.TomlSerializer.Deserialize<Tomlyn.Model.TomlTable>(File.ReadAllText(source));
+            if (config == null || !config.ContainsKey("renderer_backend"))
+                throw new InvalidDataException("The staged FFNx.toml is missing renderer_backend.");
+
+            if (File.Exists(destination)) File.Copy(destination, destination + ".before-7h-import.bak", true);
+            File.Copy(source, destination, true);
+            Logger.Info($"Imported staged FFNx.toml from {source} to {destination}.");
+            Instance.RaiseProgressChanged("Imported FFNx.toml from the 7th Heaven folder.");
+            return true;
+        }
+
         internal static RuntimeProfile CreateRuntimeProfile()
         {
             List<RuntimeMod> runtimeMods = null;
@@ -763,7 +987,7 @@ namespace AppUI.Classes
             try
             {
                 runtimeMods = Sys.ActiveProfile.ActiveItems.Select(i => i.GetRuntime(Sys._context))
-                                                           .Where(i => i != null)
+                                                           .Where(i => i != null && !Path.GetFileName(i.BaseFolder).Equals(".bannerlator-audio-cache", StringComparison.OrdinalIgnoreCase))
                                                            .ToList();
             }
             catch (Exception)
@@ -789,17 +1013,27 @@ namespace AppUI.Classes
             return runtimeProfiles;
         }
 
-        private static void Copy7thWrapperDlls()
+        private static void Copy7thWrapperDlls(bool replacingPriorLoader = false)
         {
             string src = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
             string dest = Path.GetDirectoryName(Sys.Settings.FF7Exe);
+
+            string loaderSource = Path.Combine(src, "AppLoader.dll");
+            string loaderDestination = Path.Combine(dest, "dinput.dll");
+            if (File.Exists(loaderDestination) && !FilesHaveSameHash(loaderSource, loaderDestination) && !replacingPriorLoader)
+            {
+                throw new IOException($"Cannot install the 7th Heaven loader because {loaderDestination} already exists and is not this version of AppLoader.dll. Back up and remove a leftover 7th Heaven loader before retrying.");
+            }
 
             File.Copy(Path.Combine(src, "AppProxy.runtimeconfig.json"), Path.Combine(dest, "AppProxy.runtimeconfig.json"), true);
             File.Copy(Path.Combine(src, "AppProxy.dll"), Path.Combine(dest, "AppProxy.dll"), true);
             File.Copy(Path.Combine(src, "SharpCompress.dll"), Path.Combine(dest, "SharpCompress.dll"), true);
             File.Copy(Path.Combine(src, "AppWrapper.dll"), Path.Combine(dest, "AppWrapper.dll"), true);
-            File.Copy(Path.Combine(src, "AppLoader.dll"), Path.Combine(dest, "dinput.dll"), true);
-            File.Copy(Path.Combine(src, "AppLoader.pdb"), Path.Combine(dest, "AppLoader.pdb"), true);
+            File.Copy(loaderSource, loaderDestination, true);
+            if (File.Exists(Path.Combine(src, "AppLoader.pdb")))
+            {
+                File.Copy(Path.Combine(src, "AppLoader.pdb"), Path.Combine(dest, "AppLoader.pdb"), true);
+            }
             File.Copy(Path.Combine(src, "nethost.dll"), Path.Combine(dest, "nethost.dll"), true);
             File.Copy(Path.Combine(src, "System.Runtime.Serialization.Formatters.dll"), Path.Combine(dest, "System.Runtime.Serialization.Formatters.dll"), true);
         }
@@ -807,6 +1041,7 @@ namespace AppUI.Classes
         private static void Delete7thWrapperDlls()
         {
             string dest = Path.GetDirectoryName(Sys.Settings.FF7Exe);
+            string src = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
 
             string workshopDir = Path.Combine(dest, "7thWorkshop");
             if (Directory.Exists(workshopDir)) Directory.Delete(workshopDir, true);
@@ -815,10 +1050,25 @@ namespace AppUI.Classes
             File.Delete(Path.Combine(dest, "AppProxy.dll"));
             File.Delete(Path.Combine(dest, "SharpCompress.dll"));
             File.Delete(Path.Combine(dest, "AppWrapper.dll"));
-            File.Delete(Path.Combine(dest, "dinput.dll"));
+            string loaderDestination = Path.Combine(dest, "dinput.dll");
+            if (File.Exists(loaderDestination) && FilesHaveSameHash(Path.Combine(src, "AppLoader.dll"), loaderDestination))
+            {
+                File.Delete(loaderDestination);
+            }
             File.Delete(Path.Combine(dest, "AppLoader.pdb"));
             File.Delete(Path.Combine(dest, "nethost.dll"));
             File.Delete(Path.Combine(dest, "System.Runtime.Serialization.Formatters.dll"));
+        }
+
+        private static bool FilesHaveSameHash(string firstPath, string secondPath)
+        {
+            if (!File.Exists(firstPath) || !File.Exists(secondPath)) return false;
+
+            using var first = File.OpenRead(firstPath);
+            using var second = File.OpenRead(secondPath);
+            if (first.Length != second.Length) return false;
+
+            return SHA256.HashData(first).SequenceEqual(SHA256.HashData(second));
         }
 
         private static void StartTurboLogForVariableDump(RuntimeProfile runtimeProfiles)
@@ -884,12 +1134,13 @@ namespace AppUI.Classes
         /// <summary>
         /// Launches FF7.exe without loading any mods.
         /// </summary>
-        internal static async Task<bool> LaunchFF7Exe()
+        internal static async Task<bool> LaunchFF7Exe(bool cleanupGameFiles = true, string executablePath = null)
         {
-            string launchExecutablePath = GetLaunchExecutablePath();
+            string launchExecutablePath = executablePath ?? GetLaunchExecutablePath();
 
             try
             {
+                Instance.RaiseProgressChanged($"Starting {launchExecutablePath} ...");
                 // Start game directly
                 ProcessStartInfo startInfo = new ProcessStartInfo(launchExecutablePath)
                 {
@@ -897,12 +1148,20 @@ namespace AppUI.Classes
                     UseShellExecute = true,
                 };
                 ff7Proc = Process.Start(startInfo);
+                if (ff7Proc == null)
+                {
+                    Instance.RaiseProgressChanged($"Process.Start returned no process for {launchExecutablePath}.", NLog.LogLevel.Error);
+                    return false;
+                }
+                Process launchedProcess = ff7Proc;
+                DateTime launchTime = DateTime.UtcNow;
+                Logger.Info($"Started {launchExecutablePath} with process ID {launchedProcess.Id}.");
 
-                ff7Proc.EnableRaisingEvents = true;
-                ff7Proc.Exited += (o, e) =>
+                EventHandler onGameExit = (o, e) =>
                 {
                     try
                     {
+                        Logger.Warn($"{launchExecutablePath} process {launchedProcess.Id} exited after {(DateTime.UtcNow - launchTime).TotalSeconds:F1}s with code {launchedProcess.ExitCode}.");
                         if (!IsFF7Running() && Instance._controllerInterceptor != null)
                         {
                             // stop polling for input once all ff7 procs are closed (could be multiple instances open)
@@ -915,15 +1174,33 @@ namespace AppUI.Classes
                             EnableOrDisableReunionMod(doEnable: true);
                         }
 
-                        // cleanup
-                        Delete7thWrapperDlls();
-                        ReShadeUpdater.Cleanup();
+                        if (cleanupGameFiles)
+                        {
+                            Delete7thWrapperDlls();
+                            ReShadeUpdater.Cleanup();
+                        }
                     }
                     catch (Exception ex)
                     {
                         Logger.Error(ex);
                     }
                 };
+                launchedProcess.Exited += onGameExit;
+                launchedProcess.EnableRaisingEvents = true;
+                if (launchedProcess.HasExited)
+                {
+                    Logger.Warn($"{launchExecutablePath} exited before the launcher was fully monitored.");
+                }
+
+                if (WineEnvironment.IsRunningInWine())
+                {
+                    await Task.Delay(1000);
+                    if (launchedProcess.HasExited && launchedProcess.ExitCode != 0)
+                    {
+                        Instance.RaiseProgressChanged($"{Path.GetFileName(launchExecutablePath)} exited with code {launchedProcess.ExitCode} before FF7 started.", NLog.LogLevel.Error);
+                        return false;
+                    }
+                }
 
                 return true;
             }

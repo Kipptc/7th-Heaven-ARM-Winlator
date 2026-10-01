@@ -13,6 +13,7 @@ using System.Windows.Forms;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.IO;
+using System.Windows.Threading;
 
 namespace AppUI
 {
@@ -26,10 +27,30 @@ namespace AppUI
         internal MainWindowViewModel ViewModel { get; set; }
 
         private int _currentTabIndex = 0;
+        private readonly DispatcherTimer _wineSearchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
 
         public MainWindow()
         {
             InitializeComponent();
+
+            _wineSearchTimer.Tick += (sender, args) =>
+            {
+                _wineSearchTimer.Stop();
+                if (ViewModel != null && ViewModel.SearchText != txtSearch.Text) ViewModel.SearchText = txtSearch.Text;
+                ViewModel?.DoSearch();
+            };
+
+            if (WineEnvironment.IsRunningInWine())
+            {
+                // Wine's WIC scaler does not implement Fant interpolation (mode 3).
+                // Keep startup and mod-list images on its supported nearest mode.
+                RenderOptions.SetBitmapScalingMode(this, BitmapScalingMode.NearestNeighbor);
+                RenderOptions.SetBitmapScalingMode(imgLoading, BitmapScalingMode.NearestNeighbor);
+                RenderOptions.SetBitmapScalingMode(imgModPreview, BitmapScalingMode.NearestNeighbor);
+                imgLoading.Visibility = Visibility.Collapsed;
+                imgModPreview.Visibility = Visibility.Collapsed;
+                imgWineModPreview.Visibility = Visibility.Visible;
+            }
 
             ViewModel = new MainWindowViewModel();
             this.DataContext = ViewModel;
@@ -121,6 +142,7 @@ namespace AppUI
                 }
             }
 
+            _wineSearchTimer.Stop();
             Sys.Settings.MainWindow = new SavedWindow()
             {
                 X = (int)System.Windows.Application.Current.MainWindow.Left,
@@ -145,6 +167,8 @@ namespace AppUI
         {
             if (e.Key == Key.Enter)
             {
+                _wineSearchTimer.Stop();
+                if (ViewModel.SearchText != txtSearch.Text) ViewModel.SearchText = txtSearch.Text;
                 ViewModel.DoSearch();
             }
         }
@@ -381,7 +405,15 @@ namespace AppUI
 
         private void txtSearch_TextChanged(object sender, TextChangedEventArgs e)
         {
-            ViewModel.DoSearch();
+            if (ViewModel == null) return;
+            if (!WineEnvironment.IsRunningInWine())
+            {
+                ViewModel.DoSearch();
+                return;
+            }
+
+            _wineSearchTimer.Stop();
+            _wineSearchTimer.Start();
         }
 
         private void menuItemLaunchSettings_Click(object sender, RoutedEventArgs e)

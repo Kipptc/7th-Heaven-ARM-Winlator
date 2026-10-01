@@ -18,6 +18,8 @@
 mono_crash.*
 
 # Build results
+.dist/
+.tools/
 [Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/
@@ -472,6 +474,7 @@ FodyWeavers.xsd
 
 # Executables
 *.exe
+!third_party/lzma-sdk/7zr-arm64.exe
 *.out
 *.app
 

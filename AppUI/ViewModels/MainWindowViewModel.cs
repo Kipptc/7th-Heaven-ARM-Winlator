@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using StbImageSharp;
 
 namespace AppUI.ViewModels
 {
@@ -29,6 +30,10 @@ namespace AppUI.ViewModels
         #region Data Members And Properties
 
         private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
+        public bool IsInitialFFNxSetupReady => FFNxDriverUpdater.IsInitialSetupReady;
+        private readonly List<ModStatusEventArgs> _winePendingInstalledStatuses = new List<ModStatusEventArgs>();
+        private bool _wineInstallRefreshScheduled;
+        private bool _wineCatalogSearchPending;
 
         internal string ShowAllText
         {
@@ -105,6 +110,10 @@ namespace AppUI.ViewModels
         private string _previewModLink;
         private string _previewDonationModLink;
         private Uri _previewModImageSource;
+        private BitmapSource _wineModPreviewSource;
+        private BitmapSource _cachedWinePreviewSource;
+        private string _cachedWinePreviewPath;
+        private DateTime _cachedWinePreviewWriteTimeUtc;
         private bool _previewModHasReadMe;
         private bool _previewIsNotifyAboutUpdatesChecked;
         private bool _previewIsAutoUpdateModsChecked;
@@ -126,7 +135,7 @@ namespace AppUI.ViewModels
         {
             get
             {
-                return $"{App.GetAppName()} v{App.GetAppVersion().ToString()} - {ResourceHelper.Get(StringKey.ModManagerForFinalFantasy7)} [{CurrentProfile}] {FFNxUpdateVersion}";
+                return $"{App.GetAppName()} v{App.GetAppVersion().ToString(3)} - {ResourceHelper.Get(StringKey.ModManagerForFinalFantasy7)} [{CurrentProfile}] {FFNxUpdateVersion}";
             }
         }
 
@@ -517,6 +526,17 @@ namespace AppUI.ViewModels
             }
         }
 
+        public BitmapSource WineModPreviewSource
+        {
+            get => _wineModPreviewSource;
+            private set
+            {
+                if (ReferenceEquals(_wineModPreviewSource, value)) return;
+                _wineModPreviewSource = value;
+                NotifyPropertyChanged();
+            }
+        }
+
         public List<FilterItemViewModel> AvailableFilters
         {
             get
@@ -617,7 +637,7 @@ namespace AppUI.ViewModels
         {
             get
             {
-                return !IsGameLaunching && _isPlayToggleButtonEnabled;
+                return !IsGameLaunching && _isPlayToggleButtonEnabled && IsInitialFFNxSetupReady;
             }
             set
             {
@@ -650,6 +670,12 @@ namespace AppUI.ViewModels
         
         public MainWindowViewModel()
         {
+            FFNxDriverUpdater.InitialSetupReadyChanged += _ =>
+                App.Current.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    NotifyPropertyChanged(nameof(IsInitialFFNxSetupReady));
+                    NotifyPropertyChanged(nameof(IsPlayToggleButtonEnabled));
+                }));
             SearchText = "";
             IsGameLaunching = false;
             IsPlayToggleButtonEnabled = true;
@@ -659,6 +685,23 @@ namespace AppUI.ViewModels
 
             CatalogMods = new CatalogViewModel();
             CatalogMods.SelectedModChanged += CatalogViewModel_SelectedModChanged;
+            if (WineEnvironment.IsRunningInWine())
+            {
+                CatalogMods.DownloadList.CollectionChanged += (_, e) =>
+                {
+                    if (!CatalogMods.DownloadList.Any(d => d.Download.IsModOrPatchDownload))
+                    {
+                        ScheduleWineInstallRefresh();
+                        return;
+                    }
+                    if (e.Action != System.Collections.Specialized.NotifyCollectionChangedAction.Add) return;
+                    // Release the preview bitmap before the mod download and UI navigation overlap.
+                    WineModPreviewSource = null;
+                    PreviewModImageSource = null;
+                    LoadingGifVisibility = Visibility.Hidden;
+                    NoImageTextVisibility = Visibility.Visible;
+                };
+            }
 
             LoadingGifVisibility = Visibility.Hidden;
         }
@@ -670,6 +713,7 @@ namespace AppUI.ViewModels
         /// </summary>
         public void InitViewModel()
         {
+            if (WineEnvironment.IsRunningInWine()) Logger.Info("Bannerlator v0.7.0 beta: isolated 7z extraction and reusable Wine config preview.");
             Sys.MessageReceived += Sys_MessageReceived;
             Sys.StatusChanged += new EventHandler<ModStatusEventArgs>(Sys_StatusChanged);
 
@@ -779,7 +823,7 @@ namespace AppUI.ViewModels
             // Ensure crashreports directory exists
             Directory.CreateDirectory(Sys.PathToCrashReports);
 
-            if (Sys.Settings.HasOption(GeneralOptions.CheckForUpdates))
+            if (!WineEnvironment.IsRunningInWine() && Sys.Settings.HasOption(GeneralOptions.CheckForUpdates))
             {
                 Task.Factory.StartNew(() =>
                 {
@@ -886,11 +930,83 @@ namespace AppUI.ViewModels
 
         private void Sys_StatusChanged(object sender, ModStatusEventArgs e)
         {
+            if (WineEnvironment.IsRunningInWine() && e.Status == ModStatus.Installed)
+            {
+                // A queued download may start as soon as this import finishes. Refresh the
+                // WPF lists once the entire mod queue has drained.
+                App.Current.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    _winePendingInstalledStatuses.Add(e);
+                    ScheduleWineInstallRefresh();
+                }),
+                    System.Windows.Threading.DispatcherPriority.Background);
+                return;
+            }
+
+            HandleStatusChanged(e);
+        }
+
+        private void ScheduleWineInstallRefresh()
+        {
+            if (_wineInstallRefreshScheduled ||
+                (_winePendingInstalledStatuses.Count == 0 && !_wineCatalogSearchPending) ||
+                CatalogMods.DownloadList.Any(d => d.Download.IsModOrPatchDownload)) return;
+
+            _wineInstallRefreshScheduled = true;
+            App.Current.Dispatcher.BeginInvoke(new Action(FlushWineInstallRefresh),
+                System.Windows.Threading.DispatcherPriority.ContextIdle);
+        }
+
+        private void FlushWineInstallRefresh()
+        {
+            _wineInstallRefreshScheduled = false;
+            if (CatalogMods.DownloadList.Any(d => d.Download.IsModOrPatchDownload)) return;
+
+            var statuses = _winePendingInstalledStatuses.ToList();
+            _winePendingInstalledStatuses.Clear();
+            bool applyCatalogSearch = _wineCatalogSearchPending;
+            _wineCatalogSearchPending = false;
+            if (statuses.Count == 0)
+            {
+                if (applyCatalogSearch) DoSearch();
+                return;
+            }
+
+            Logger.Info($"Installed status refresh: updating {statuses.Count} mod(s) after download queue drained.");
+            foreach (var e in statuses)
+            {
+                CatalogMods.UpdateModDetails(e.ModID);
+                var mod = Sys.Library.GetItem(e.ModID);
+                if (mod?.LatestInstalled != null)
+                    InstalledItem.RemoveFromInfoCache(mod.LatestInstalled.InstalledLocation);
+            }
+
+            MyMods.ReloadModListFromUIThread(MyMods.GetSelectedMod()?.InstallInfo.ModID, SearchText, CheckedCategories, CheckedTags);
+            Logger.Info("Installed status refresh: My Mods list ready.");
+
+            if (Sys.Settings.HasOption(GeneralOptions.AutoActiveNewMods))
+            {
+                foreach (var e in statuses.Where(s => s.OldStatus != ModStatus.Installed))
+                {
+                    if (Sys.ActiveProfile.Items.Any(i => i.ModID == e.ModID && !i.IsModActive))
+                        MyMods.ToggleActivateMod(e.ModID, reloadList: false);
+                }
+            }
+
+            if (applyCatalogSearch)
+                App.Current.Dispatcher.BeginInvoke(new Action(DoSearch),
+                    System.Windows.Threading.DispatcherPriority.ContextIdle);
+        }
+
+        private void HandleStatusChanged(ModStatusEventArgs e)
+        {
             if (e.Status == ModStatus.PendingInstall)
             {
                 return;
             }
 
+            if (WineEnvironment.IsRunningInWine() && e.Status == ModStatus.Installed)
+                Logger.Info($"Installed status refresh: catalog details for {e.ModID}.");
             CatalogMods.UpdateModDetails(e.ModID);
 
             if (e.Status == ModStatus.Installed)
@@ -899,7 +1015,9 @@ namespace AppUI.ViewModels
                 InstalledItem mod = Sys.Library.GetItem(e.ModID);
                 string mfile = mod.LatestInstalled.InstalledLocation;
                 InstalledItem.RemoveFromInfoCache(mfile);
+                if (WineEnvironment.IsRunningInWine()) Logger.Info($"Installed status refresh: My Mods list for {e.ModID}.");
                 MyMods.ReloadModListFromUIThread(MyMods.GetSelectedMod()?.InstallInfo.ModID, SearchText, CheckedCategories, CheckedTags);
+                if (WineEnvironment.IsRunningInWine()) Logger.Info($"Installed status refresh: My Mods list ready for {e.ModID}.");
             }
 
             if (e.Status == ModStatus.Installed && e.OldStatus != ModStatus.Installed && Sys.Settings.HasOption(GeneralOptions.AutoActiveNewMods))
@@ -987,6 +1105,7 @@ namespace AppUI.ViewModels
                 PreviewIsNotifyAboutUpdatesChecked = false;
                 PreviewIgnoreModUpdatesChecked = false;
                 PreviewModImageSource = null;
+                WineModPreviewSource = null;
                 return;
             }
 
@@ -1012,7 +1131,9 @@ namespace AppUI.ViewModels
 
             if (!string.IsNullOrWhiteSpace(selected.InstallInfo.CachedDetails.LatestVersion.PreviewImage))
             {
-                string pathToImage = Sys.ImageCache.GetImagePath(selected.InstallInfo.CachedDetails.LatestVersion.PreviewImage, selected.InstallInfo.CachedDetails.ID);
+                string pathToImage = WineEnvironment.IsRunningInWine() && CatalogMods.DownloadList.Any(d => d.Download.IsModOrPatchDownload)
+                    ? null
+                    : Sys.ImageCache.GetImagePath(selected.InstallInfo.CachedDetails.LatestVersion.PreviewImage, selected.InstallInfo.CachedDetails.ID);
                 SetPreviewImage(pathToImage, forceUpdate);
             }
             else
@@ -1021,6 +1142,7 @@ namespace AppUI.ViewModels
                 NoImageTextVisibility = Visibility.Visible;
                 LoadingGifVisibility = Visibility.Hidden;
                 PreviewModImageSource = null;
+                WineModPreviewSource = null;
             }
         }
 
@@ -1039,6 +1161,7 @@ namespace AppUI.ViewModels
                 PreviewModLink = "";
                 PreviewDonationModLink = "";
                 PreviewModImageSource = null;
+                WineModPreviewSource = null;
                 return;
             }
 
@@ -1057,13 +1180,84 @@ namespace AppUI.ViewModels
 
             ModUpdateMenuVisibility = Visibility.Collapsed; // do not display the 'update avaialble' menu on catalog mods
 
-            string pathToImage = Sys.ImageCache.GetImagePath(selected.Mod.LatestVersion.PreviewImage, selected.Mod.ID);
+            string pathToImage = WineEnvironment.IsRunningInWine() && CatalogMods.DownloadList.Any(d => d.Download.IsModOrPatchDownload)
+                ? null
+                : Sys.ImageCache.GetImagePath(selected.Mod.LatestVersion.PreviewImage, selected.Mod.ID);
 
             SetPreviewImage(pathToImage, forceUpdate);
         }
 
         private void SetPreviewImage(string pathToImage, bool forceUpdate = false)
         {
+            if (WineEnvironment.IsRunningInWine())
+            {
+                PreviewModImageSource = null;
+                LoadingGifVisibility = Visibility.Hidden;
+                if (string.IsNullOrWhiteSpace(pathToImage) || !File.Exists(pathToImage))
+                {
+                    WineModPreviewSource = null;
+                    NoImageTextVisibility = Visibility.Visible;
+                    return;
+                }
+
+                try
+                {
+                    DateTime writeTimeUtc = File.GetLastWriteTimeUtc(pathToImage);
+                    if (!forceUpdate && _cachedWinePreviewSource != null &&
+                        string.Equals(_cachedWinePreviewPath, pathToImage, StringComparison.OrdinalIgnoreCase) &&
+                        _cachedWinePreviewWriteTimeUtc == writeTimeUtc)
+                    {
+                        WineModPreviewSource = _cachedWinePreviewSource;
+                        NoImageTextVisibility = Visibility.Hidden;
+                        return;
+                    }
+
+                    WineModPreviewSource = null;
+                    NoImageTextVisibility = Visibility.Visible;
+                    using FileStream stream = File.OpenRead(pathToImage);
+                    ImageInfo? info = ImageInfo.FromStream(stream);
+                    if (info == null || info.Value.Width > 4096 || info.Value.Height > 4096)
+                        throw new InvalidDataException("Catalog preview exceeds 4096 pixels in either dimension.");
+                    stream.Position = 0;
+                    ImageResult image = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
+                    const int maxWidth = 450;
+                    const int maxHeight = 350;
+                    double scale = Math.Min(1d, Math.Min((double)maxWidth / image.Width,
+                        (double)maxHeight / image.Height));
+                    int width = Math.Max(1, (int)Math.Round(image.Width * scale));
+                    int height = Math.Max(1, (int)Math.Round(image.Height * scale));
+                    byte[] pixels = new byte[checked(width * height * 4)];
+                    for (int y = 0; y < height; y++)
+                    {
+                        int sourceY = Math.Min(image.Height - 1, (int)((y + 0.5) * image.Height / height));
+                        for (int x = 0; x < width; x++)
+                        {
+                            int sourceX = Math.Min(image.Width - 1, (int)((x + 0.5) * image.Width / width));
+                            int source = (sourceY * image.Width + sourceX) * 4;
+                            int target = (y * width + x) * 4;
+                            pixels[target] = image.Data[source + 2];
+                            pixels[target + 1] = image.Data[source + 1];
+                            pixels[target + 2] = image.Data[source];
+                            pixels[target + 3] = image.Data[source + 3];
+                        }
+                    }
+                    BitmapSource preview = BitmapSource.Create(width, height, 96, 96,
+                        PixelFormats.Bgra32, null, pixels, width * 4);
+                    preview.Freeze();
+                    _cachedWinePreviewPath = pathToImage;
+                    _cachedWinePreviewWriteTimeUtc = writeTimeUtc;
+                    _cachedWinePreviewSource = preview;
+                    WineModPreviewSource = preview;
+                    NoImageTextVisibility = Visibility.Hidden;
+                    Logger.Info($"Decoded catalog preview {pathToImage} at {width}x{height} pixels.");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, $"Could not decode catalog preview {pathToImage}");
+                }
+                return;
+            }
+
             NoImageTextVisibility = Visibility.Hidden;
             LoadingGifVisibility = Visibility.Visible;
             Uri newImageUri = pathToImage == null ? null : new Uri(pathToImage);
@@ -1272,6 +1466,14 @@ namespace AppUI.ViewModels
                 {
                     string msg = String.Format(ResourceHelper.Get(StringKey.ThisModContainsDataThatCouldHarm), mod.CachedDetails.Name);
 
+                    if (WineEnvironment.IsRunningInWine())
+                    {
+                        Logger.Info($"Asking whether to activate code mod {mod.CachedDetails.Name} using a standard dialog.");
+                        bool allowed = MessageBox.Show(msg, ResourceHelper.Get(StringKey.AllowModToRun), MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
+                        Logger.Info($"Code mod activation response: {(allowed ? "Yes" : "No")}");
+                        return allowed;
+                    }
+
                     AllowModToRunWindow warningWindow = new AllowModToRunWindow(msg);
                     warningWindow.ShowDialog();
 
@@ -1296,6 +1498,14 @@ namespace AppUI.ViewModels
 
         internal void DoSearch()
         {
+            if (WineEnvironment.IsRunningInWine() && (TabIndex)SelectedTabIndex == TabIndex.BrowseCatalog &&
+                CatalogMods.DownloadList.Any(d => d.Download.IsModOrPatchDownload))
+            {
+                _wineCatalogSearchPending = true;
+                Logger.Info("Catalog search deferred until the mod install queue drains.");
+                return;
+            }
+
             if (!string.IsNullOrWhiteSpace(SearchText))
             {
                 // user is now searching by text so clear checked filters/tags
@@ -1874,7 +2084,7 @@ namespace AppUI.ViewModels
             }
             else
             {
-                MessageDialogWindow messageDialog = new MessageDialogWindow(ResourceHelper.Get(StringKey.MissingPath), ResourceHelper.Get(StringKey.FFNxTomlNotFoundRunGameFirst), MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageDialogWindow messageDialog = new MessageDialogWindow(ResourceHelper.Get(StringKey.MissingPath), $"{ResourceHelper.Get(StringKey.FFNxTomlNotFoundRunGameFirst)}\n\nExpected path: {Sys.PathToFFNxToml}", MessageBoxButton.OK, MessageBoxImage.Warning);
                 messageDialog.ShowDialog();
             }
         }
@@ -1883,7 +2093,7 @@ namespace AppUI.ViewModels
         {
             if (Sys.PathToFFNxToml == null || !File.Exists(Sys.PathToFFNxToml))
             {
-                MessageDialogWindow messageDialog = new MessageDialogWindow(ResourceHelper.Get(StringKey.MissingPath), ResourceHelper.Get(StringKey.FFNxTomlNotFoundRunGameFirst), MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageDialogWindow messageDialog = new MessageDialogWindow(ResourceHelper.Get(StringKey.MissingPath), $"{ResourceHelper.Get(StringKey.FFNxTomlNotFoundRunGameFirst)}\n\nExpected path: {Sys.PathToFFNxToml}", MessageBoxButton.OK, MessageBoxImage.Warning);
                 messageDialog.ShowDialog();
                 return;
             }

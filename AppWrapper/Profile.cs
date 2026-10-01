@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Xml;
 using System.Xml.Schema;
@@ -161,6 +162,67 @@ namespace AppWrapper
         private HashSet<string> _activated = new HashSet<string>(StringComparer.InvariantCultureIgnoreCase);
         [NonSerialized]
         private IrosArc _archive;
+
+        [System.Runtime.Serialization.OptionalField]
+        private Dictionary<string, string> _preparedAudioFiles;
+
+        public Dictionary<string, string> PreparedAudioFiles => _preparedAudioFiles;
+
+        [NonSerialized]
+        private Dictionary<string, int> _audioEntries;
+
+        public static Dictionary<string, int> ReadAudioEntries(IrosArc archive)
+        {
+            var entries = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (string file in archive.AllFileNames())
+                if (file.EndsWith(".ogg", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".wav", StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith(".flac", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase))
+                    entries.Add(file, archive.GetFileSize(file));
+            return entries;
+        }
+
+        public void SetAudioEntries(Dictionary<string, int> entries) => _audioEntries = entries;
+
+        // Run in the ARM64 manager before serializing the game's profile.
+        // Keep the original mapping and conditions, but use physical audio files.
+        public int PrepareAudioFiles(string cacheRoot)
+        {
+            if (!BaseFolder.EndsWith(".iro", StringComparison.OrdinalIgnoreCase)) return 0;
+            _preparedAudioFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (_audioEntries?.Count == 0) return 0;
+            var source = new FileInfo(BaseFolder);
+            string identity = source.FullName.ToUpperInvariant() + "|" + source.Length + "|" + source.LastWriteTimeUtc.Ticks;
+            string directory = Path.Combine(cacheRoot, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))));
+            var folders = Conditionals.Select(c => c.Folder).Concat(ExtraFolders)
+                .Select(f => f.TrimEnd('\\', '/') + "\\").ToArray();
+            IrosArc archive = null;
+            try
+            {
+                if (_audioEntries == null)
+                {
+                    archive = new IrosArc(BaseFolder);
+                    _audioEntries = ReadAudioEntries(archive);
+                }
+                foreach (var entry in _audioEntries)
+                {
+                    string file = entry.Key;
+                    if (folders.Length > 0 && !folders.Any(f => file.StartsWith(f, StringComparison.OrdinalIgnoreCase))) continue;
+                    Directory.CreateDirectory(directory);
+                    string name = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(file.ToUpperInvariant()))) + Path.GetExtension(file);
+                    string destination = Path.Combine(directory, name);
+                    if (!File.Exists(destination) || new FileInfo(destination).Length != entry.Value)
+                    {
+                        archive ??= new IrosArc(BaseFolder);
+                        string temporary = destination + ".tmp";
+                        File.WriteAllBytes(temporary, archive.GetBytes(file));
+                        File.Move(temporary, destination, true);
+                    }
+                    _preparedAudioFiles.Add(file, destination);
+                }
+            }
+            finally { archive?.Dispose(); }
+            return _preparedAudioFiles.Count;
+        }
 
         public RuntimeMod(string folder, IEnumerable<ConditionalFolder> conditionalFolders, IEnumerable<string> extraFolders, ModInfo modInfo)
         {

@@ -31,6 +31,7 @@ env:
 
 jobs:
   CICD:
+    if: github.repository == 'tsunamods-codes/7th-Heaven'
     runs-on: windows-2025-vs2026
     timeout-minutes: 1440
     strategy:

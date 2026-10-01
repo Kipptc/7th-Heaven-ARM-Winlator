@@ -15,7 +15,7 @@ namespace AppUI.Windows
         {
             InitializeComponent();
 
-            this.Title = $"About {App.GetAppName()} v{App.GetAppVersion().ToString()}";
+            this.Title = $"About {App.GetAppName()} v{App.GetAppVersion().ToString(3)}";
             btnClose.Focus();
         }
 

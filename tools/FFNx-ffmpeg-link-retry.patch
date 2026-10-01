@@ -1,0 +1,19 @@
+diff --git a/configure b/configure
+--- a/configure
++++ b/configure
+@@ -1224,5 +1224,14 @@ test_ld(){
+     test_$type $($cflags_filter $flags) || return
+     flags=$($ldflags_filter $flags)
+     libs=$($ldflags_filter $libs)
+-    test_cmd $ld $LDFLAGS $LDEXEFLAGS $flags $(ld_o $TMPE) $TMPO $libs $extralibs
++    test_cmd $ld $LDFLAGS $LDEXEFLAGS $flags $(ld_o $TMPE) $TMPO $libs $extralibs && return 0
++    # Windows can briefly hold the configure probe executable after link.exe
++    # closes it. Retry only that sharing failure; preserve all other failures.
++    if tail -n 1 "$logfile" | grep -q 'LNK1104.*test.exe'; then
++        for delay in 1 2 3; do
++            sleep "$delay"
++            test_cmd $ld $LDFLAGS $LDEXEFLAGS $flags $(ld_o $TMPE) $TMPO $libs $extralibs && return 0
++        done
++    fi
++    return 1
+ }

@@ -8,7 +8,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Windows;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using StbImageSharp;
 using NAudio.Wave;
 
 namespace AppUI.ViewModels
@@ -37,6 +40,10 @@ namespace AppUI.ViewModels
         private bool _isOptionChecked;
         private int _dropdownSelectedIndex;
         private Uri _imageOptionSource;
+        private BitmapSource _winePreviewSource;
+        private WriteableBitmap _winePreviewBitmap;
+        private readonly DispatcherTimer _winePreviewTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+        private OptionValue _pendingWinePreview;
         private List<ConfigOptionViewModel> _modOptions;
         private List<OptionValueViewModel> _dropdownOptions;
         private ConfigOptionViewModel _selectedOption;
@@ -315,6 +322,11 @@ namespace AppUI.ViewModels
         {
             OptionListVisibility = Visibility.Visible;
             TreeViewVisibility = Visibility.Collapsed;
+            _winePreviewTimer.Tick += (_, _) =>
+            {
+                _winePreviewTimer.Stop();
+                DecodeWinePreview(_pendingWinePreview);
+            };
         }
 
         internal void Init(ModInfo info, Func<string, string> imageReader, Func<string, Stream> audioReader, Iros.Workshop.ProfileItem activeModInfo, List<Constraint> modConstraints, string pathToModFolderOrIro)
@@ -481,12 +493,11 @@ namespace AppUI.ViewModels
 
             if (o != null)
             {
-                ImageOptionSource = null;
-                ImageOptionSource = SetPreviewImage(_imageReader(o.PreviewFile));
+                UpdatePreviewImage(o);
             }
             else
             {
-                ImageOptionSource = null;
+                UpdatePreviewImage(null);
             }
 
             SetupAudioPreview(o);
@@ -495,7 +506,7 @@ namespace AppUI.ViewModels
 
         private void SetupAudioPreview(OptionValue o)
         {
-            if (!string.IsNullOrWhiteSpace(o.PreviewAudio))
+            if (!string.IsNullOrWhiteSpace(o?.PreviewAudio))
             {
                 PreviewButtonVisibility = Visibility.Visible;
             }
@@ -510,7 +521,7 @@ namespace AppUI.ViewModels
             _audioPath = null;
             _audioFile = null;
 
-            if (!string.IsNullOrWhiteSpace(o.PreviewAudio))
+            if (!string.IsNullOrWhiteSpace(o?.PreviewAudio))
             {
                 _audioFileName = Path.GetFileName(o.PreviewAudio);
 
@@ -576,6 +587,96 @@ namespace AppUI.ViewModels
             return new Uri(pathToImage);
         }
 
+        public BitmapSource WinePreviewSource
+        {
+            get => _winePreviewSource;
+            private set
+            {
+                _winePreviewSource = value;
+                NotifyPropertyChanged();
+            }
+        }
+
+        private void UpdatePreviewImage(OptionValue option)
+        {
+            if (!WineEnvironment.IsRunningInWine())
+            {
+                ImageOptionSource = option == null || string.IsNullOrWhiteSpace(option.PreviewFile)
+                    ? null : SetPreviewImage(_imageReader(option.PreviewFile));
+                return;
+            }
+
+            _pendingWinePreview = option;
+            _winePreviewTimer.Stop();
+            _winePreviewTimer.Start();
+        }
+
+        private void DecodeWinePreview(OptionValue option)
+        {
+            if (option == null || string.IsNullOrWhiteSpace(option.PreviewFile))
+            {
+                ClearWinePreview();
+                return;
+            }
+
+            try
+            {
+                string path = _imageReader(option.PreviewFile);
+                if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                {
+                    ClearWinePreview();
+                    return;
+                }
+
+                // Decode without Wine's WIC codecs. WPF receives raw pixels only.
+                using FileStream stream = File.OpenRead(path);
+                ImageInfo? info = ImageInfo.FromStream(stream);
+                if (info == null || info.Value.Width > 4096 || info.Value.Height > 4096)
+                    throw new InvalidDataException("Preview image exceeds 4096 pixels in either dimension.");
+                stream.Position = 0;
+                ImageResult image = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
+                const int maxPreviewWidth = 400;
+                const int maxPreviewHeight = 320;
+                double scale = Math.Min(1d, Math.Min((double)maxPreviewWidth / image.Width,
+                    (double)maxPreviewHeight / image.Height));
+                int width = Math.Max(1, (int)Math.Round(image.Width * scale));
+                int height = Math.Max(1, (int)Math.Round(image.Height * scale));
+                byte[] pixels = new byte[maxPreviewWidth * maxPreviewHeight * 4];
+                int left = (maxPreviewWidth - width) / 2;
+                int top = (maxPreviewHeight - height) / 2;
+                for (int y = 0; y < height; y++)
+                {
+                    int sourceY = Math.Min(image.Height - 1, (int)((y + 0.5) * image.Height / height));
+                    for (int x = 0; x < width; x++)
+                    {
+                        int sourceX = Math.Min(image.Width - 1, (int)((x + 0.5) * image.Width / width));
+                        int source = (sourceY * image.Width + sourceX) * 4;
+                        int target = ((y + top) * maxPreviewWidth + x + left) * 4;
+                        pixels[target] = image.Data[source + 2];
+                        pixels[target + 1] = image.Data[source + 1];
+                        pixels[target + 2] = image.Data[source];
+                        pixels[target + 3] = image.Data[source + 3];
+                    }
+                }
+                _winePreviewBitmap ??= new WriteableBitmap(maxPreviewWidth, maxPreviewHeight, 96, 96,
+                    PixelFormats.Bgra32, null);
+                _winePreviewBitmap.WritePixels(new Int32Rect(0, 0, maxPreviewWidth, maxPreviewHeight),
+                    pixels, maxPreviewWidth * 4, 0);
+                if (WinePreviewSource == null) WinePreviewSource = _winePreviewBitmap;
+                Logger.Info($"Decoded mod preview {option.PreviewFile} at {width}x{height} pixels.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, $"Could not decode mod preview {option.PreviewFile}");
+            }
+        }
+
+        private void ClearWinePreview()
+        {
+            if (_winePreviewBitmap != null)
+                _winePreviewBitmap.WritePixels(new Int32Rect(0, 0, 400, 320), new byte[400 * 320 * 4], 400 * 4, 0);
+        }
+
         private void UpdateViewForDropdownSelectionChanged()
         {
             if (_selectedOption == null || DropdownSelectedIndex == -1)
@@ -586,11 +687,14 @@ namespace AppUI.ViewModels
             OptionValue o = DropdownOptions.ElementAt(DropdownSelectedIndex)?.OptionValue;
             if (o != null)
             {
-                ImageOptionSource = SetPreviewImage(_imageReader(o.PreviewFile));
+                Logger.Info($"Selected mod option {_selectedOption.Option.ID} value {o.Value}.");
+                UpdatePreviewImage(o);
             }
             else
             {
-                ImageOptionSource = null;
+                UpdatePreviewImage(null);
+                SetupAudioPreview(null);
+                return;
             }
 
             SetupAudioPreview(o);
@@ -714,8 +818,11 @@ namespace AppUI.ViewModels
 
         internal void CleanUp()
         {
+            _winePreviewTimer.Stop();
+            _pendingWinePreview = null;
             StopAudio();
             ImageOptionSource = null;
+            WinePreviewSource = null;
             DeleteTempAudioFiles();
         }
 

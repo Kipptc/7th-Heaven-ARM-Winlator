@@ -214,6 +214,17 @@
                        VerticalAlignment="Stretch"
                        Margin="10"/>
 
+                <Image x:Name="imgWinePreview"
+                       Grid.Row="2"
+                       Grid.Column="1"
+                       Source="{Binding WinePreviewSource}"
+                       Stretch="None"
+                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                       Visibility="Collapsed"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Margin="10"/>
+
                 <TextBlock x:Name="txtCompatibility"
                            Grid.Column="1"
                            Grid.Row="3"

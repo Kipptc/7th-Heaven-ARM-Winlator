@@ -52,6 +52,7 @@ namespace AppUI.ViewModels
 
         private object _listLock = new object();
         private object _downloadLock = new object();
+        private readonly Dictionary<Guid, long> _lastProgressUiTick = new Dictionary<Guid, long>();
         private bool _isSelectedDownloadPaused;
         private DownloadItemViewModel _selectedDownload;
         private bool _pauseDownloadIsEnabled;
@@ -1109,8 +1110,29 @@ namespace AppUI.ViewModels
                 return;
             }
 
-            UpdateDownloadProgress(item, e.ProgressPercentage, download.BytesWritten, download.ContentLength);
-            UpdatePauseDownloadButtonUI();
+            if (!ShouldDispatchProgress(item.UniqueId, e.ProgressPercentage)) return;
+
+            long bytesWritten = download.BytesWritten;
+            long contentLength = download.ContentLength;
+            App.Current.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (item.FileDownloadTask != download) return;
+                UpdateDownloadProgress(item, e.ProgressPercentage, bytesWritten, contentLength);
+                UpdatePauseDownloadButtonUI();
+            }));
+        }
+
+        private bool ShouldDispatchProgress(Guid downloadId, int percent)
+        {
+            lock (_downloadLock)
+            {
+                long now = Environment.TickCount64;
+                if (percent < 100 && _lastProgressUiTick.TryGetValue(downloadId, out long last) && now - last < 100)
+                    return false;
+
+                _lastProgressUiTick[downloadId] = now;
+                return true;
+            }
         }
 
         public void AddToDownloadQueue(DownloadItem newDownload)
@@ -1176,7 +1198,14 @@ namespace AppUI.ViewModels
 
         void WebRequest_DownloadFileCompleted(object sender, AsyncCompletedEventArgs e)
         {
+            if (!App.Current.Dispatcher.CheckAccess())
+            {
+                App.Current.Dispatcher.BeginInvoke(new Action(() => WebRequest_DownloadFileCompleted(sender, e)));
+                return;
+            }
+
             DownloadItem item = (DownloadItem)e.UserState;
+            lock (_downloadLock) _lastProgressUiTick.Remove(item.UniqueId);
             CleanUpFileDownloadTask(item);
 
             if (e.Cancelled)
@@ -1213,6 +1242,8 @@ namespace AppUI.ViewModels
         {
             int downloadCount = 0;
 
+            if (WineEnvironment.IsRunningInWine())
+                Logger.Info($"Install queue: removing completed item {item.ItemName}.");
 
             App.Current.Dispatcher.Invoke(() =>
             {
@@ -1228,9 +1259,24 @@ namespace AppUI.ViewModels
                 }
             });
 
+            if (WineEnvironment.IsRunningInWine())
+                Logger.Info($"Install queue: removed {item.ItemName}; {downloadCount} item(s) remain.");
+
             if (downloadCount > 0)
             {
-                StartNextDownloadInQueue();
+                if (WineEnvironment.IsRunningInWine())
+                {
+                    // Let the import callback return before starting another network task.
+                    App.Current.Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        Logger.Info("Install queue: starting next queued download after callback returned.");
+                        StartNextDownloadInQueue();
+                    }), System.Windows.Threading.DispatcherPriority.ContextIdle);
+                }
+                else
+                {
+                    StartNextDownloadInQueue();
+                }
             }
         }
 
@@ -1343,9 +1389,25 @@ namespace AppUI.ViewModels
 
         private void CompleteIProc(DownloadItem item, AsyncCompletedEventArgs e)
         {
+            if (WineEnvironment.IsRunningInWine()) Logger.Info($"Install queue: completing import for {item.ItemName}.");
             item.IProc.DownloadComplete(e);
+            if (WineEnvironment.IsRunningInWine()) Logger.Info($"Install queue: import callback returned for {item.ItemName}.");
+
+            if (WineEnvironment.IsRunningInWine() && item.IsModOrPatchDownload)
+            {
+                App.Current.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    Logger.Info($"Install queue: removing mod after import callback returned for {item.ItemName}.");
+                    RemoveFromDownloadList(item);
+                    UpdatePauseDownloadButtonUI();
+                    Logger.Info($"Install queue: completion UI updated for {item.ItemName}.");
+                }), System.Windows.Threading.DispatcherPriority.ContextIdle);
+                return;
+            }
+
             RemoveFromDownloadList(item);
             UpdatePauseDownloadButtonUI();
+            if (WineEnvironment.IsRunningInWine()) Logger.Info($"Install queue: completion UI updated for {item.ItemName}.");
         }
 
         private void ProcessDownloadComplete(DownloadItem item, AsyncCompletedEventArgs e)
@@ -1409,7 +1471,8 @@ namespace AppUI.ViewModels
                 itemViewModel.PercentComplete = 0;
                 item.IProc.SetPercentComplete = i =>
                 {
-                    itemViewModel.PercentComplete = i;
+                    if (!ShouldDispatchProgress(item.UniqueId, i)) return;
+                    App.Current.Dispatcher.BeginInvoke(new Action(() => itemViewModel.PercentComplete = i));
                 };
             }
 

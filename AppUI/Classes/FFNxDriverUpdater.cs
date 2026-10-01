@@ -1,4 +1,4 @@
-﻿using AppCore;
+using AppCore;
 using Iros.Workshop;
 using Newtonsoft.Json.Linq;
 using AppUI.Windows;
@@ -18,6 +18,28 @@ namespace AppUI.Classes
     class FFNxDriverUpdater
     {
         private FileVersionInfo _currentDriverVersion = null;
+        public static bool IsInitialSetupReady { get; private set; } = true;
+        public static bool IsInitialSetupInProgress { get; private set; }
+        public static event Action<bool> InitialSetupReadyChanged;
+
+        private static void SetInitialSetupReady(bool ready, bool inProgress = false)
+        {
+            IsInitialSetupReady = ready;
+            IsInitialSetupInProgress = inProgress;
+            InitialSetupReadyChanged?.Invoke(ready);
+            Sys.Message(new WMessage(ready ? "Initial FFNx setup completed." : "Initial FFNx setup is pending.",
+                WMessageLogLevel.LogOnly));
+        }
+
+        public static void AbortInitialSetup() => SetInitialSetupReady(false);
+
+        private static bool PreserveCustomDriver(bool notify)
+        {
+            if (!IsAlreadyInstalled() || !FFNxDeployment.IsCustomManaged(Sys.InstallPath, AppContext.BaseDirectory)) return false;
+            Sys.Message(new WMessage("Keeping the custom FFNx build; automatic replacement is disabled for this installation.", WMessageLogLevel.LogOnly));
+            if (notify) MessageDialogWindow.Show("This installation uses a custom FFNx build. Updates are managed through the FFNx folder beside 7th Heaven.exe.", "Custom FFNx", MessageBoxButton.OK, MessageBoxImage.Information);
+            return true;
+        }
 
         private string GetUpdateInfoPath()
         {
@@ -102,6 +124,7 @@ namespace AppUI.Classes
 
         public void CheckForUpdates(FFNxUpdateChannelOptions channel, bool manualCheck = false)
         {
+            if (PreserveCustomDriver(manualCheck)) return;
             DownloadItem download = new DownloadItem()
             {
                 Links = new List<string>() { LocationUtil.FormatHttpUrl(GetUpdateChannel(channel)) },
@@ -185,9 +208,15 @@ namespace AppUI.Classes
             Sys.Downloads.AddToDownloadQueue(download);
         }
 
-        public void DownloadAndExtractLatestVersion(FFNxUpdateChannelOptions channel)
+        public void DownloadAndExtractLatestVersion(FFNxUpdateChannelOptions channel, bool initialSetup = false)
         {
-            SwitchToDownloadPanel();
+            if (initialSetup) SetInitialSetupReady(false, inProgress: true);
+            if (PreserveCustomDriver(true))
+            {
+                if (initialSetup) SetInitialSetupReady(true);
+                return;
+            }
+            if (!initialSetup) SwitchToDownloadPanel();
 
             DownloadItem download = new DownloadItem()
             {
@@ -196,6 +225,11 @@ namespace AppUI.Classes
                 Category = DownloadCategory.AppUpdate,
                 ItemName = $"Fetching the latest FFNx version using channel {Sys.Settings.FFNxUpdateChannel.ToString()}..."
             };
+            if (initialSetup)
+            {
+                download.OnError = AbortInitialSetup;
+                download.OnCancel = AbortInitialSetup;
+            }
 
             download.IProc = new Install.InstallProcedureCallback(e =>
             {
@@ -211,16 +245,18 @@ namespace AppUI.Classes
                         File.Delete(download.SaveFilePath);
 
                         Version newVersion = new Version(GetUpdateVersion(release.name.Value));
-                        DownloadAndExtract(GetUpdateReleaseUrl(release.assets), newVersion.ToString());
+                        DownloadAndExtract(GetUpdateReleaseUrl(release.assets), newVersion.ToString(), initialSetup);
                     }
                     catch (Exception)
                     {
+                        if (initialSetup) SetInitialSetupReady(false);
                         MessageDialogWindow.Show("Something went wrong while checking for FFNx updates. Please try again later.", "Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
                         Sys.Message(new WMessage() { Text = $"Could not parse the FFNx release json at {GetUpdateChannel(channel)}", LoggedException = e.Error });
                     }
                 }
                 else
                 {
+                    if (initialSetup) SetInitialSetupReady(false);
                     MessageDialogWindow.Show("Something went wrong while checking for FFNx updates. Please try again later.", "Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
                     Sys.Message(new WMessage() { Text = $"Could not fetch for FFNx updates at {GetUpdateChannel(channel)}", LoggedException = e.Error });
                 }
@@ -229,11 +265,16 @@ namespace AppUI.Classes
             Sys.Downloads.AddToDownloadQueue(download);
         }
 
-        private void DownloadAndExtract(string url, string version)
+        private void DownloadAndExtract(string url, string version, bool initialSetup = false)
         {
+            if (PreserveCustomDriver(false))
+            {
+                if (initialSetup) SetInitialSetupReady(true);
+                return;
+            }
             if (url != String.Empty)
             {
-                SwitchToDownloadPanel();
+                if (!initialSetup) SwitchToDownloadPanel();
 
                 DownloadItem download = new DownloadItem()
                 {
@@ -242,6 +283,11 @@ namespace AppUI.Classes
                     Category = DownloadCategory.AppUpdate,
                     ItemName = $"Downloading FFNx Update {url}..."
                 };
+                if (initialSetup)
+                {
+                    download.OnError = AbortInitialSetup;
+                    download.OnCancel = AbortInitialSetup;
+                }
 
                 download.IProc = new Install.InstallProcedureCallback(e =>
                 {
@@ -249,35 +295,60 @@ namespace AppUI.Classes
 
                     if (success)
                     {
-                        using (var archive = ZipArchive.OpenArchive(download.SaveFilePath, new SharpCompress.Readers.ReaderOptions()
+                        try
                         {
-                            LeaveStreamOpen = false
-                        }))
-                        {
-                            foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
+                            if (PreserveCustomDriver(false))
                             {
-                                entry.WriteToDirectory(Sys.InstallPath, new ExtractionOptions()
-                                {
-                                        ExtractFullPath = true,
-                                        Overwrite = true
-                                });
+                                if (initialSetup) SetInitialSetupReady(true);
+                                return;
                             }
+                            if (WineEnvironment.IsRunningInWine())
+                            {
+                                SafeZipExtractor.ExtractFiles(download.SaveFilePath, Sys.InstallPath);
+                            }
+                            else
+                            {
+                                using (var archive = ZipArchive.OpenArchive(download.SaveFilePath, new SharpCompress.Readers.ReaderOptions()
+                                {
+                                    LeaveStreamOpen = false
+                                }))
+                                {
+                                    foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
+                                    {
+                                        entry.WriteToDirectory(Sys.InstallPath, new ExtractionOptions()
+                                        {
+                                            ExtractFullPath = true,
+                                            Overwrite = true
+                                        });
+                                    }
+                                }
+                            }
+
+                            SwitchToModPanel();
+                            Sys.FFNxConfig.Backup();
+                            Sys.FFNxConfig.Reload();
+                            Sys.FFNxConfig.ResetTo7thHeavenDefaults();
+                            Sys.FFNxConfig.OverrideInternalKeys();
+                            Sys.FFNxConfig.Save();
+                            FFNxDeployment.Apply(Sys.InstallPath, AppContext.BaseDirectory);
+                            Sys.FFNxConfig.Reload();
+
+                            File.Delete(download.SaveFilePath);
+
+                            MessageDialogWindow.Show($"Successfully updated FFNx to version {version}. All options have been set to default.\n\nEnjoy!", "Success", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+                            Sys.Message(new WMessage() { Text = $"Successfully updated FFNx to version {version}" });
+                            if (initialSetup) SetInitialSetupReady(true);
                         }
-
-                        SwitchToModPanel();
-                        Sys.FFNxConfig.Backup();
-                        Sys.FFNxConfig.Reload();
-                        Sys.FFNxConfig.ResetTo7thHeavenDefaults();
-                        Sys.FFNxConfig.OverrideInternalKeys();
-                        Sys.FFNxConfig.Save();
-
-                        File.Delete(download.SaveFilePath);
-
-                        MessageDialogWindow.Show($"Successfully updated FFNx to version {version}. All options have been set to default.\n\nEnjoy!", "Success", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
-                        Sys.Message(new WMessage() { Text = $"Successfully updated FFNx to version {version}" });
+                        catch (Exception ex)
+                        {
+                            if (initialSetup) SetInitialSetupReady(false);
+                            Sys.Message(new WMessage() { Text = "FFNx installation failed", LoggedException = ex });
+                            MessageDialogWindow.Show($"FFNx installation failed: {ex.Message}", "FFNx error", MessageBoxButton.OK, MessageBoxImage.Error);
+                        }
                     }
                     else
                     {
+                        if (initialSetup) SetInitialSetupReady(false);
                         MessageDialogWindow.Show("Something went wrong while downloading the FFNx update. Please try again later.", "Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
                         Sys.Message(new WMessage() { Text = $"Could not download the FFNx update {url}", LoggedException = e.Error });
                     }
@@ -287,6 +358,7 @@ namespace AppUI.Classes
             }
             else
             {
+                if (initialSetup) SetInitialSetupReady(false);
                 MessageDialogWindow.Show("Something went wrong while downloading the FFNx update. Please try again later.", "Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
             }
         }
@@ -330,7 +402,7 @@ namespace AppUI.Classes
             bool ret = fi.Exists;
 
             if (Sys.Settings.FF7InstalledVersion == FF7Version.Steam && fi.Exists)
-            {   
+            {
                 // Steam driver is not FFNx, force installation
                 if (fi.Length <= (192 * 1024)) ret = false;
             }

@@ -1,0 +1,24 @@
+diff --git a/src/log.cpp b/src/log.cpp
+index 04cf026..cf02f98 100644
+--- a/src/log.cpp
++++ b/src/log.cpp
+@@ -33,7 +33,18 @@ FILE *app_log;
+ 
+ void open_applog(char *path)
+ {
+-	app_log = fopen(path, "wb");
++	app_log = nullptr;
++	HMODULE ntdll = GetModuleHandleA("ntdll.dll");
++	if (ntdll && GetProcAddress(ntdll, "wine_get_version") &&
++		(GetFileAttributesA("D:\\Bannerlator") & FILE_ATTRIBUTE_DIRECTORY) &&
++		GetFileAttributesA("D:\\Bannerlator") != INVALID_FILE_ATTRIBUTES)
++	{
++		const char *directory = "D:\\Bannerlator\\FINAL FANTASY VII (2013)";
++		CreateDirectoryA(directory, nullptr);
++		app_log = fopen("D:\\Bannerlator\\FINAL FANTASY VII (2013)\\FFNx.log", "wb");
++	}
++	// Preserve normal logging if Downloads is unavailable or unwritable.
++	if (!app_log) app_log = fopen(path, "wb");
+ 
+ 	if(!app_log) MessageBoxA(gameHwnd, "Failed to open log file", "Error", 0);
+ }

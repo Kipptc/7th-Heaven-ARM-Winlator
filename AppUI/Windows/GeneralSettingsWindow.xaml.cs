@@ -7,6 +7,8 @@ using System.Windows;
 using System.Diagnostics;
 using System;
 using System.Threading;
+using System.Windows.Controls;
+using System.Windows.Data;
 
 namespace AppUI.Windows
 {
@@ -25,9 +27,18 @@ namespace AppUI.Windows
 
         private ReShadeUpdater ReShadeUpdater = new ReShadeUpdater();
 
+        private readonly bool _useDirectPathFields;
+
         public GeneralSettingsWindow()
         {
             InitializeComponent();
+
+            _useDirectPathFields = WineEnvironment.IsRunningInWine();
+            if (_useDirectPathFields)
+            {
+                BindingOperations.ClearBinding(txtFf7Exe, TextBox.TextProperty);
+                BindingOperations.ClearBinding(txtLibrary, TextBox.TextProperty);
+            }
 
             ViewModel = new GeneralSettingsViewModel();
             ViewModel.ListDataChanged += ViewModel_ListDataChanged;
@@ -35,6 +46,14 @@ namespace AppUI.Windows
             this.DataContext = ViewModel;
 
             ViewModel.LoadSettings(Sys.Settings);
+            RefreshPathFields();
+        }
+
+        private void RefreshPathFields()
+        {
+            if (!_useDirectPathFields) return;
+            txtFf7Exe.Text = ViewModel.FF7ExePathInput ?? "";
+            txtLibrary.Text = ViewModel.LibraryPathInput ?? "";
         }
 
         private void ViewModel_ListDataChanged()
@@ -44,6 +63,11 @@ namespace AppUI.Windows
 
         private void btnOk_Click(object sender, RoutedEventArgs e)
         {
+            if (_useDirectPathFields)
+            {
+                ViewModel.FF7ExePathInput = txtFf7Exe.Text;
+                ViewModel.LibraryPathInput = txtLibrary.Text;
+            }
             bool settingsSaved = ViewModel.SaveSettings(true);
 
             if (settingsSaved)
@@ -68,15 +92,27 @@ namespace AppUI.Windows
                 initialDir = Path.GetDirectoryName(ViewModel.FF7ExePathInput);
             }
 
-            string exePath = FileDialogHelper.BrowseForFile("FF7 executable (ff7.exe, ff7_en.exe, FFVII.exe)|ff7.exe;ff7_en.exe;FFVII.exe", ResourceHelper.Get(StringKey.SelectFf7Exe), initialDir);
+            string exePath = FileDialogHelper.BrowseForFile("FF7 executable (ff7.exe, ff7_en.exe, FFVII.exe, FF7_Launcher.exe)|ff7.exe;ff7_en.exe;FFVII.exe;FF7_Launcher.exe", ResourceHelper.Get(StringKey.SelectFf7Exe), initialDir);
 
             if (!string.IsNullOrEmpty(exePath))
             {
+                if (Path.GetFileName(exePath).Equals("FF7_Launcher.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    string gameExe = Path.Combine(Path.GetDirectoryName(exePath), "ff7_en.exe");
+                    if (File.Exists(gameExe)) exePath = gameExe;
+                }
+
+                Logger.Info($"Selected FF7 executable: {exePath}");
+                ViewModel.FF7ExePathInput = exePath;
                 Sys.Settings.FF7Exe = exePath;
                 GeneralSettingsViewModel.AutoDetectSystemPaths(Sys.Settings);
-
-                ViewModel.FF7ExePathInput = Sys.Settings.FF7Exe;
+                // Detection can change paths in global settings; keep the file
+                // explicitly selected by the user in the editable field.
+                ViewModel.FF7ExePathInput = exePath;
+                if (_useDirectPathFields) txtFf7Exe.Text = exePath;
+                Logger.Info($"FF7 path field after selection: {txtFf7Exe.Text}");
             }
+            else Logger.Warn("FF7 file dialog closed without a selected path.");
         }
 
         private void btnLibrary_Click(object sender, RoutedEventArgs e)
@@ -86,6 +122,7 @@ namespace AppUI.Windows
             if (!string.IsNullOrEmpty(folderPath))
             {
                 ViewModel.LibraryPathInput = folderPath;
+                if (_useDirectPathFields) txtLibrary.Text = folderPath;
             }
         }
 
@@ -335,6 +372,7 @@ namespace AppUI.Windows
         private void btnDefaults_Click(object sender, RoutedEventArgs e)
         {
             ViewModel.ResetToDefaults();
+            RefreshPathFields();
         }
 
         private void cmbFFNxChannel_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)

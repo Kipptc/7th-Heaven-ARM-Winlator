@@ -16,6 +16,12 @@ namespace AppWrapper {
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool VirtualProtect(IntPtr lpAddress, uint dwSize, Protection flNewProtect, out Protection lpflOldProtect);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool FlushInstructionCache(IntPtr hProcess, IntPtr lpBaseAddress, uint dwSize);
+
         public enum Protection : int {
             PAGE_NOACCESS = 0x01,
             PAGE_READONLY = 0x02,
@@ -94,13 +100,19 @@ namespace AppWrapper {
                         string[] parts = instruct.Split('=');
                         IntPtr addr = GetAddress(parts[0], offset);
                         byte[] bytes = GetBytes(parts[1]);
-                        Protection prot;
-                        if (VirtualProtect(addr, (uint)bytes.Length, Protection.PAGE_READWRITE, out prot))
+                        Protection originalProtection;
+                        if (VirtualProtect(addr, (uint)bytes.Length, Protection.PAGE_EXECUTE_READWRITE, out originalProtection))
                         {
-                            if (prot == Protection.PAGE_EXECUTE || prot == Protection.PAGE_EXECUTE_READ)
-                                VirtualProtect(addr, (uint)bytes.Length, Protection.PAGE_EXECUTE_READWRITE, out prot);
                             Util.CopyToIntPtr(bytes, addr, bytes.Length);
+                            if (!FlushInstructionCache(GetCurrentProcess(), addr, (uint)bytes.Length))
+                                DebugLogger.WriteLine($"FlushInstructionCache failed for Hext address {addr.ToInt64():X}");
+                            // Hext code caves may live on pages that were originally data.
+                            // Leave patched pages executable so injected calls can enter them.
+                            if (((int)originalProtection & 0xF0) == 0)
+                                DebugLogger.WriteLine($"Hext enabled execution at {addr.ToInt64():X} (previous protection: {originalProtection})");
                         }
+                        else
+                            DebugLogger.WriteLine($"Could not make Hext address {addr.ToInt64():X} writable");
                     }
                     else if (instruct.Contains(':'))
                     {

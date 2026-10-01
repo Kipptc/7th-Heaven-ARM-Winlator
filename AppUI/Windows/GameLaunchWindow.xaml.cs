@@ -108,7 +108,9 @@ namespace AppUI.Windows
                 }
                 else
                 {
-                    Sys.Message(new WMessage(ResourceHelper.Get(StringKey.SuccessfullyLaunchedFf7)));
+                    Sys.Message(new WMessage(GameLauncher.IsExternalLaunchPrepared
+                        ? "Mods are ready. Start FF7 using Bannerlator's Steam game shortcut targeting ff7_en.exe."
+                        : ResourceHelper.Get(StringKey.SuccessfullyLaunchedFf7)));
                     App.Current.Dispatcher.Invoke(() =>
                     {
                         this.Close();
